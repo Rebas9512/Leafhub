@@ -6,7 +6,26 @@ build-backend = "setuptools.build_meta"
 name            = "leafhub"
 version         = "0.1.0"
 description     = "Local encrypted API key vault for LLM projects"
+readme          = "README.md"
 requires-python = ">=3.11"
+license         = { file = "LICENSE" }
+authors         = [{ name = "Rebas9512", email = "weiyixin9512@gmail.com" }]
+keywords        = [
+    "llm", "api-key", "vault", "credentials", "security",
+    "openai", "anthropic", "ollama", "encryption",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 dependencies = [
     "cryptography>=42",   # AES-256-GCM
@@ -24,11 +43,16 @@ dev = [
     "pytest-asyncio>=0.23", # asyncio test plugin (used by anyio/httpx internals)
 ]
 
-[tool.pytest.ini_options]
-asyncio_mode = "strict"
+[project.urls]
+Homepage    = "https://github.com/Rebas9512/Leafhub"
+Source      = "https://github.com/Rebas9512/Leafhub"
+"Bug Tracker" = "https://github.com/Rebas9512/Leafhub/issues"
 
 [project.scripts]
 leafhub = "leafhub.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
