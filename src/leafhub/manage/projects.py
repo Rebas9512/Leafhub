@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -139,6 +142,35 @@ def _copy_probe_to_project(project_dir: Path) -> None:
         shutil.copy2(_PROBE_SOURCE, dest)
     except Exception:
         pass   # probe copy is optional; never fail the link for this
+
+
+# ── Dotfile removal ───────────────────────────────────────────────────────────
+
+_FILES_TO_REMOVE = (_DOTFILE_NAME, _PROBE_COPY_NAME)
+
+
+def _remove_project_files(project_dir: Path) -> list[str]:
+    """
+    Remove LeafHub-managed files from *project_dir* when a project is deleted.
+
+    Removes:
+    - ``.leafhub``       — project token (the critical one)
+    - ``leafhub_probe.py`` — convenience probe copy
+
+    Returns a list of filenames that were actually removed.
+    Silently skips files that do not exist and never raises.
+    """
+    removed: list[str] = []
+    for name in _FILES_TO_REMOVE:
+        target = project_dir / name
+        try:
+            target.unlink()
+            removed.append(name)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.warning("Could not remove %s", target)
+    return removed
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -283,10 +315,16 @@ async def update_project(request: Request, project_id: str,
 async def delete_project(request: Request, project_id: str):
     store = _store(request)
     try:
-        await asyncio.to_thread(store.get_project, project_id)
+        p = await asyncio.to_thread(store.get_project, project_id)
     except KeyError:
         raise HTTPException(404, f"Project '{project_id}' not found")
-    await asyncio.to_thread(store.delete_project, project_id)
+
+    def _delete():
+        if p.path:
+            _remove_project_files(Path(p.path))
+        store.delete_project(project_id)
+
+    await asyncio.to_thread(_delete)
 
 
 @router.post("/projects/{project_id}/rotate-token")

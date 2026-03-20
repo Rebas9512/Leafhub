@@ -233,25 +233,28 @@ def cmd_project_create(args: argparse.Namespace) -> None:
     if link_path is not None and not link_path.is_dir():
         _die(f"Link directory not found: {args.path}")
 
-    store, _ = _open_store()
-    project, raw_token = store.create_project(name)
+    store, hub_dir = _open_store()
+    try:
+        project, raw_token = store.create_project(name)
 
-    if link_path is not None:
-        _write_dotfile(link_path, name, raw_token)
-        if copy_probe:
-            _copy_probe_to_project(link_path)
-        store.set_project_path(project.id, str(link_path))
+        if link_path is not None:
+            _write_dotfile(link_path, name, raw_token)
+            if copy_probe:
+                _copy_probe_to_project(link_path)
+            store.set_project_path(project.id, str(link_path))
+            print(f"✓ Project '{name}' created and linked to {link_path}.")
+            print(f"  .leafhub written — project auto-detects credentials on startup.")
+            if copy_probe:
+                print(f"  leafhub_probe.py copied to project root.")
+        else:
+            print(f"✓ Project '{name}' created.")
+            _print_token_box(raw_token)
+            print("  Add to your project .env:")
+            print(f"    LEAFHUB_TOKEN={raw_token}\n")
+
+        _interactive_bind_wizard(store, hub_dir, project.id, name)
+    finally:
         store.close()
-        print(f"✓ Project '{name}' created and linked to {link_path}.")
-        print(f"  .leafhub written — project auto-detects credentials on startup.")
-        if copy_probe:
-            print(f"  leafhub_probe.py copied to project root.")
-    else:
-        store.close()
-        print(f"✓ Project '{name}' created.")
-        _print_token_box(raw_token)
-        print("  Add to your project .env:")
-        print(f"    LEAFHUB_TOKEN={raw_token}\n")
 
 
 def cmd_project_link(args: argparse.Namespace) -> None:
@@ -264,25 +267,28 @@ def cmd_project_link(args: argparse.Namespace) -> None:
     if not link_path.is_dir():
         _die(f"Directory not found: {args.path}")
 
-    store, _ = _open_store()
-    p = store.find_project_by_name(name)
-    if p is None:
+    store, hub_dir = _open_store()
+    try:
+        p = store.find_project_by_name(name)
+        if p is None:
+            _die(f"Project '{name}' not found.")
+
+        # Rotate token so the new dotfile is the only valid credential.
+        raw_token = store.rotate_token(p.id)
+        store.set_project_path(p.id, str(link_path))
+
+        _write_dotfile(link_path, name, raw_token)
+        if copy_probe:
+            _copy_probe_to_project(link_path)
+
+        print(f"✓ Project '{name}' linked to {link_path}.")
+        print(f"  .leafhub written — token rotated, old token invalidated.")
+        if copy_probe:
+            print(f"  leafhub_probe.py copied to project root.")
+
+        _interactive_bind_wizard(store, hub_dir, p.id, name)
+    finally:
         store.close()
-        _die(f"Project '{name}' not found.")
-
-    # Rotate token so the new dotfile is the only valid credential.
-    raw_token = store.rotate_token(p.id)
-    store.set_project_path(p.id, str(link_path))
-    store.close()
-
-    _write_dotfile(link_path, name, raw_token)
-    if copy_probe:
-        _copy_probe_to_project(link_path)
-
-    print(f"✓ Project '{name}' linked to {link_path}.")
-    print(f"  .leafhub written — token rotated, old token invalidated.")
-    if copy_probe:
-        print(f"  leafhub_probe.py copied to project root.")
 
 
 def cmd_project_list(args: argparse.Namespace) -> None:
@@ -413,9 +419,179 @@ def cmd_project_delete(args: argparse.Namespace) -> None:
         print("Aborted.")
         return
 
+    if p.path:
+        from leafhub.manage.projects import _remove_project_files
+        removed = _remove_project_files(Path(p.path))
+        for fname in removed:
+            print(f"  removed {p.path}/{fname}")
+
     store.delete_project(p.id)
     store.close()
     print(f"✓ Project '{name}' deleted.")
+
+
+# ── Provider/binding wizard helpers ────────────────────────────────────────────
+
+def _prompt_new_provider(store, hub_dir: "Path") -> "object | None":
+    """
+    Interactively collect provider info, persist it, and return the provider object.
+    Returns None if the user cancels or an error occurs.
+    """
+    import getpass
+
+    print("\nNew provider setup:")
+    name = input("  Label: ").strip()
+    if not name:
+        print("  Cancelled.")
+        return None
+    if store.find_provider_by_label(name):
+        print(f"  Provider '{name}' already exists — using it.")
+        return store.find_provider_by_label(name)
+
+    formats = ["openai-completions", "anthropic-messages", "ollama"]
+    print("  API format:")
+    for i, f in enumerate(formats, 1):
+        print(f"    [{i}] {f}")
+    fmt_raw = input("  Choose [1-3] (default 1): ").strip() or "1"
+    try:
+        fmt = formats[int(fmt_raw) - 1]
+    except (ValueError, IndexError):
+        fmt = "openai-completions"
+
+    default_url = _default_base_url(fmt)
+    base_url = input(f"  Base URL [{default_url}]: ").strip() or default_url
+
+    default_model_val = _default_model(fmt)
+    model = input(f"  Default model [{default_model_val}]: ").strip() or default_model_val
+
+    if fmt == "ollama":
+        key = input("  API key (leave blank for none): ").strip()
+    else:
+        key = getpass.getpass("  API key: ").strip()
+        if not key:
+            print("  API key is required.")
+            return None
+
+    from .core.crypto import load_master_key, encrypt_providers, decrypt_providers
+
+    provider = store.create_provider(
+        label=name,
+        provider_type="custom",
+        api_format=fmt,
+        base_url=base_url,
+        default_model=model,
+        available_models=[],
+        auth_mode=None,
+        auth_header=None,
+        extra_headers={},
+    )
+    try:
+        master_key = load_master_key(hub_dir)
+        key_store  = decrypt_providers(master_key, hub_dir)
+        key_store[provider.id] = {"api_key": key}
+        encrypt_providers(key_store, master_key, hub_dir)
+    except Exception as exc:
+        store.delete_provider(provider.id)
+        print(f"  Failed to save API key: {exc}")
+        return None
+
+    print(f"  ✓ Provider '{name}' added.")
+    return provider
+
+
+def _interactive_bind_wizard(
+    store,
+    hub_dir: "Path",
+    project_id: str,
+    project_name: str,
+) -> None:
+    """
+    Offer to bind provider aliases to *project_id* interactively.
+
+    Uses *project_id* (not name) for all store operations so the right project
+    is targeted even when same-name projects exist.  Silently skips when stdin
+    is not a TTY (CI / non-interactive shells).
+    """
+    import sys
+    if not sys.stdin.isatty():
+        return
+
+    while True:
+        providers = store.list_providers()
+
+        print()
+        chosen_provider = None
+
+        if providers:
+            print("Bind a provider to this project?")
+            print("Available providers:")
+            for i, p in enumerate(providers, 1):
+                print(f"  [{i}] {p.label}  ({p.api_format})")
+            print("  [n] Add a new provider")
+            print(
+                f"  [s] Skip  "
+                f"(run later: leafhub project bind {project_name} --alias <alias> --provider <name>)"
+            )
+            print()
+            choice = input("Choice: ").strip().lower()
+        else:
+            print("No providers configured yet.")
+            yn = input("Add a provider and bind it now? [Y/n]: ").strip().lower()
+            if yn in ("", "y", "yes"):
+                choice = "n"
+            else:
+                print(
+                    f"  Bind later: "
+                    f"leafhub project bind {project_name} --alias <alias> --provider <name>"
+                )
+                return
+
+        if choice in ("s", "skip", ""):
+            print(
+                f"  Bind later: "
+                f"leafhub project bind {project_name} --alias <alias> --provider <name>"
+            )
+            return
+
+        if choice == "n":
+            chosen_provider = _prompt_new_provider(store, hub_dir)
+            if chosen_provider is None:
+                return
+        else:
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(providers):
+                    chosen_provider = providers[idx]
+                else:
+                    print("  Invalid choice — binding skipped.")
+                    return
+            except ValueError:
+                print("  Invalid choice — binding skipped.")
+                return
+
+        alias = input(f"  Alias for '{chosen_provider.label}' (e.g. 'chat', 'openai'): ").strip()
+        if not alias:
+            print("  No alias given — binding skipped.")
+            return
+
+        try:
+            store.add_binding(
+                project_id=project_id,
+                alias=alias,
+                provider_id=chosen_provider.id,
+            )
+            print(f"✓ Bound alias '{alias}' → '{chosen_provider.label}' in project '{project_name}'.")
+        except Exception as exc:
+            print(f"  Binding failed: {exc}")
+            print(
+                f"  Run: leafhub project bind {project_name} "
+                f"--alias {alias} --provider {chosen_provider.label}"
+            )
+            return
+
+        again = input("  Add another binding? [y/N]: ").strip().lower()
+        if again not in ("y", "yes"):
+            return
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────

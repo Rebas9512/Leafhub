@@ -246,9 +246,9 @@ Remove-Item -Recurse $env:USERPROFILE\.leafhub   # also delete stored keys (opti
 
 | File | Responsibility |
 |------|----------------|
-| `cli.py` | argparse CLI. Subcommands: `provider add/list/show/delete`, `project create/link/list/show/token/bind/unbind/delete`, `manage`. |
+| `cli.py` | argparse CLI. Subcommands: `provider add/list/show/delete`, `project create/link/list/show/token/bind/unbind/delete`, `manage`. After `project create` and `project link`, an interactive binding wizard prompts the user to bind an existing provider or add a new one inline. Silently skipped in non-TTY environments. |
 | `sdk.py` | `LeafHub` — runtime client for application code. Resolves the hub directory, verifies the project token, decrypts API keys, builds provider-specific auth headers. `from_directory()` auto-loads from a `.leafhub` dotfile. |
-| `probe.py` | Stdlib-only auto-detection module. `detect()` searches for a `.leafhub` dotfile, probes the manage server port, checks for the CLI binary and SDK. Returns a `ProbeResult` with convenience properties (`ready`, `can_link`, `open_sdk()`). Distributed as `leafhub_probe.py` when a project is linked. |
+| `probe.py` | Stdlib-only auto-detection module. `detect()` searches for a `.leafhub` dotfile, probes the manage server port, checks for the CLI binary and SDK. Returns a `ProbeResult` with convenience properties (`ready`, `can_link`, `open_sdk()`). `register()` creates and links a project programmatically, then runs an interactive provider-binding wizard (REST API or CLI backend). Distributed as `leafhub_probe.py` when a project is linked. |
 | `errors.py` | Typed exception hierarchy: `LeafHubError`, `StorageNotFoundError`, `InvalidTokenError`, `AliasNotBoundError`, `DecryptionError`. |
 
 ---
@@ -272,7 +272,7 @@ Requires `pip install 'leafhub[manage]'`.
 | `server.py` | FastAPI app factory. Lifespan hooks load the master key and open SQLite. Serves the compiled Vue UI from `ui/dist/`. Exposes `GET /health` and `GET /admin/status`. |
 | `auth.py` | Admin token middleware. Reads `LEAFHUB_ADMIN_TOKEN` from environment; all `/admin/*` routes require a matching Bearer token with constant-time comparison. Per-IP sliding-window rate limiter (5 failures → 5-minute lockout). |
 | `providers.py` | CRUD routes for providers. **Connectivity probe on create**: `POST /admin/providers` makes a GET request to the provider's endpoint before saving. Returns HTTP 422 with a diagnostic message if unreachable. `provider_type` and `api_format` are immutable after creation. |
-| `projects.py` | CRUD routes for projects. Token lifecycle: create (plaintext shown once), rotate, revoke. `POST /admin/projects/{id}/link` rotates the token, writes a `.leafhub` dotfile (chmod 600), and optionally copies `leafhub_probe.py` to the project root. Same-name projects are allowed — each has an independent token. |
+| `projects.py` | CRUD routes for projects. Token lifecycle: create (plaintext shown once), rotate, revoke. `POST /admin/projects/{id}/link` rotates the token, writes a `.leafhub` dotfile (chmod 600), and optionally copies `leafhub_probe.py` to the project root. `DELETE /admin/projects/{id}` removes `.leafhub` and `leafhub_probe.py` from the linked directory before deleting the DB record, leaving the project directory clean. Same-name projects are allowed — each has an independent token. |
 
 ---
 
@@ -299,7 +299,9 @@ The central workflow that removes token management from application code.
 2. **Link a directory** — LeafHub writes:
    - `.leafhub` — a JSON file with the project token (chmod 600, auto-added to `.gitignore`)
    - `leafhub_probe.py` — a standalone detection module you can integrate directly (optional, default on)
-3. **On next startup** — call `detect()` or `LeafHub.from_directory()`. Both walk up the directory tree looking for `.leafhub`, just like git looks for `.git`.
+3. **Bind providers** — LeafHub prompts you to bind an existing provider (or add a new one) immediately after create/link. You can add multiple aliases in one session.
+4. **On next startup** — call `detect()` or `LeafHub.from_directory()`. Both walk up the directory tree looking for `.leafhub`, just like git looks for `.git`.
+5. **Delete a project** — when deleted via the CLI or Web UI, LeafHub removes `.leafhub` and `leafhub_probe.py` from the linked directory, restoring it to a clean state with no stale tokens or conflicting dotfiles.
 
 ### `leafhub_probe.py` — the distributed detection file
 
@@ -493,6 +495,46 @@ leafhub manage --rebuild                                  # force-rebuild Vue UI
 leafhub manage --dev                                      # dev mode: hot-reload Vite + FastAPI backend side-by-side
 ```
 
+### Interactive provider binding
+
+After `project create` or `project link`, the CLI offers an interactive binding wizard if stdin is a terminal:
+
+```
+Bind a provider to this project?
+Available providers:
+  [1] OpenAI  (openai-completions)
+  [2] Anthropic  (anthropic-messages)
+  [n] Add a new provider
+  [s] Skip  (run later: leafhub project bind my-project --alias <alias> --provider <name>)
+
+Choice: 1
+  Alias for 'OpenAI' (e.g. 'chat', 'openai'): chat
+✓ Bound alias 'chat' → 'OpenAI' in project 'my-project'.
+  Add another binding? [y/N]: n
+```
+
+- If **no providers exist**, you are prompted to add one inline before binding.
+- In CI / non-interactive shells (stdin not a TTY), the wizard is skipped silently.
+- The same wizard runs when registering a project via `probe.register()` — see [Reverse Registration](#reverse-registration).
+
+### Reverse registration (`probe.register()`)
+
+External projects can register themselves with LeafHub programmatically using `register()`. After linking, the wizard runs interactively over the REST API (if the manage server is running) or via the CLI binary:
+
+```python
+from leafhub.probe import detect, register
+
+found = detect()
+if not found.ready:
+    # Creates the project, links the directory, and offers the binding wizard.
+    found = register("my-project")   # links cwd
+
+hub = found.open_sdk()
+key = hub.get_key("chat")
+```
+
+If providers already exist in the vault, you are shown the list and asked to pick one. If none exist, you are prompted to enter provider details (which are saved to the vault). The wizard supports adding multiple aliases in one session.
+
 ### `--no-probe` flag
 
 Both `project create --path` and `project link` copy `leafhub_probe.py` to the project root by default. Pass `--no-probe` to skip this if you already have the file or don't want it.
@@ -556,7 +598,7 @@ GET    /admin/projects
 POST   /admin/projects            body: {name, bindings?, path?, copy_probe?}
 GET    /admin/projects/{id}
 PUT    /admin/projects/{id}
-DELETE /admin/projects/{id}
+DELETE /admin/projects/{id}      → removes .leafhub + leafhub_probe.py from linked dir
 POST   /admin/projects/{id}/rotate-token
 POST   /admin/projects/{id}/deactivate
 POST   /admin/projects/{id}/activate
@@ -612,6 +654,8 @@ The server makes a lightweight GET to the provider before persisting anything:
 **Validated before saved.** Provider configurations are connectivity-probed before the first DB write. A bad API key or wrong base URL is caught at configuration time, not at 3 AM when a pipeline job fails.
 
 **Same name, independent identity.** Multiple projects can share a name. Each project is identified by its token hash, not its name. This enables multi-agent and multi-environment patterns without inventing artificial naming schemes.
+
+**Clean deletion.** When a project is deleted (CLI or Web UI), LeafHub removes `.leafhub` and `leafhub_probe.py` from the linked directory before deleting the database record. This leaves the project directory in a clean state — no stale tokens, no leftover probe files — so it can be re-linked to a new project without conflicts.
 
 **Loopback-only management server.** `leafhub manage` binds to `127.0.0.1` only. Not designed to be network-exposed; the loopback bind is the primary security boundary in dev mode.
 
