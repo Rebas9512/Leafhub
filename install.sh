@@ -1,32 +1,38 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-#  LeafHub — Installer  (macOS / Linux / WSL)
+#  LeafHub — One-liner Installer  (macOS / Linux / WSL)
 #
-#  Run from the project root:
-#    chmod +x install.sh && ./install.sh
+#  curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.sh | bash
 #
 #  Environment variables:
-#    LEAFHUB_NO_SETUP=1   Skip the interactive first-run hint
-#    NO_COLOR=1           Disable colour output
+#    LEAFHUB_DIR=<path>      Install directory  (default: ~/leafhub)
+#    LEAFHUB_REPO_URL=<url>  Clone URL          (default: GitHub repo)
+#    NO_COLOR=1              Disable colour output
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/.venv"
+DEFAULT_INSTALL_DIR="$HOME/leafhub"
+LEAFHUB_DIR="${LEAFHUB_DIR:-}"
+REPO_URL="${LEAFHUB_REPO_URL:-https://github.com/Rebas9512/Leafhub.git}"
 BIN_DIR="$HOME/.local/bin"
 ORIGINAL_PATH="${PATH:-}"
 PATH_PERSISTED=0
+VENV_DIR=""
+VENV_PYTHON=""
+VENV_PIP=""
+LEAFHUB_BIN=""
+LEAFHUB_LINK="$BIN_DIR/leafhub"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
-if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != "dumb" ]]; then
+if [[ -n "${NO_COLOR:-}" || "${TERM:-dumb}" == "dumb" ]]; then
+    BOLD='' GREEN='' YELLOW='' RED='' MUTED='' NC=''
+else
     BOLD='\033[1m'
     GREEN='\033[38;2;0;229;180m'
     YELLOW='\033[38;2;255;176;32m'
     RED='\033[38;2;230;57;70m'
     MUTED='\033[38;2;110;120;148m'
     NC='\033[0m'
-else
-    BOLD='' GREEN='' YELLOW='' RED='' MUTED='' NC=''
 fi
 
 ok()      { echo -e "${GREEN}✓${NC}  $*"; }
@@ -35,16 +41,68 @@ warn()    { echo -e "${YELLOW}!${NC}  $*"; }
 fail()    { echo -e "${RED}✗${NC}  $*" >&2; exit 1; }
 section() { echo ""; echo -e "${BOLD}── $* ──${NC}"; }
 
-path_has_dir() { case ":${1}:" in *":${2%/}:"*) return 0 ;; *) return 1 ;; esac }
+# ── Helpers ───────────────────────────────────────────────────────────────────
+normalise_path() {
+    local raw="${1:-}"
+    local expanded="${raw/#\~/$HOME}"
+    if [[ -n "$expanded" && "$expanded" != /* ]]; then
+        expanded="$(pwd -P)/$expanded"
+    fi
+    while [[ "${expanded}" != "/" && "${expanded}" == */ ]]; do
+        expanded="${expanded%/}"
+    done
+    printf '%s' "$expanded"
+}
+
+dir_has_entries() {
+    local dir="$1"
+    local entry
+    for entry in "$dir"/.[!.]* "$dir"/..?* "$dir"/*; do
+        [[ -e "$entry" ]] && return 0
+    done
+    return 1
+}
+
+path_has_dir() {
+    case ":${1}:" in *":${2%/}:"*) return 0 ;; *) return 1 ;; esac
+}
+
+# ── Select install directory ──────────────────────────────────────────────────
+if [[ -z "$LEAFHUB_DIR" ]]; then
+    default_dir="$(normalise_path "$DEFAULT_INSTALL_DIR")"
+    if [[ -r /dev/tty && -w /dev/tty && -z "${CI:-}" ]]; then
+        printf 'Install directory [%s]: ' "$default_dir" > /dev/tty
+        if IFS= read -r candidate < /dev/tty; then
+            candidate="${candidate:-$default_dir}"
+        else
+            candidate="$default_dir"
+        fi
+        LEAFHUB_DIR="$(normalise_path "$candidate")"
+    else
+        LEAFHUB_DIR="$(normalise_path "$DEFAULT_INSTALL_DIR")"
+    fi
+fi
+
+# If the target exists and is non-empty but not a git repo, redirect into a
+# subdirectory so we don't clobber the user's existing files.
+if [[ ! -d "$LEAFHUB_DIR/.git" ]] && \
+   [[ -d "$LEAFHUB_DIR" ]] && dir_has_entries "$LEAFHUB_DIR"; then
+    LEAFHUB_DIR="$(normalise_path "$LEAFHUB_DIR/leafhub")"
+fi
+
+VENV_DIR="$LEAFHUB_DIR/.venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_PIP="$VENV_DIR/bin/pip"
+LEAFHUB_BIN="$VENV_DIR/bin/leafhub"
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}  LeafHub — Installer${NC}"
-echo -e "${MUTED}  Project: $SCRIPT_DIR${NC}"
+echo -e "${MUTED}  Install path: $LEAFHUB_DIR${NC}"
 echo ""
 
-# ── Step 1: OS ────────────────────────────────────────────────────────────────
-section "Step 1 / 4  —  Platform"
+# ── Step 1: Platform ──────────────────────────────────────────────────────────
+section "Platform"
 
 OS="unknown"
 if   [[ "$OSTYPE" == "darwin"* ]];                                    then OS="macos"
@@ -53,12 +111,12 @@ elif [[ "$OSTYPE" == "linux-gnu"* || "$OSTYPE" == "linux"* ]];        then OS="l
 fi
 
 if [[ "$OS" == "unknown" ]]; then
-    fail "Unsupported OS ($OSTYPE).  On Windows use: install.ps1"
+    fail "Unsupported OS ($OSTYPE).\nOn Windows use: irm https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.ps1 | iex"
 fi
 ok "Platform: $OS"
 
-# ── Step 2: Python ────────────────────────────────────────────────────────────
-section "Step 2 / 4  —  Python"
+# ── Step 2: Python 3.11+ ──────────────────────────────────────────────────────
+section "Python"
 
 PYTHON=""
 for cmd in python3.13 python3.12 python3.11 python3 python; do
@@ -74,32 +132,41 @@ if [[ -z "$PYTHON" ]]; then
 fi
 ok "Python: $PYTHON ($("$PYTHON" -c 'import sys; print(sys.version.split()[0])'))"
 
-# ── Step 3: Virtual environment + install ─────────────────────────────────────
-section "Step 3 / 4  —  Virtual environment"
+command -v git >/dev/null 2>&1 || fail "git is required but not found."
 
-VENV_PYTHON="$VENV_DIR/bin/python"
-VENV_PIP="$VENV_DIR/bin/pip"
+# ── Step 3: Clone / update ────────────────────────────────────────────────────
+section "Installing LeafHub"
 
-if [[ -x "$VENV_PYTHON" ]]; then
-    ok "Venv exists — reusing."
+if [[ -d "$LEAFHUB_DIR/.git" ]]; then
+    info "Existing installation found — updating..."
+    git -C "$LEAFHUB_DIR" pull --ff-only --quiet
+    ok "Updated to latest."
 else
+    info "Cloning into $LEAFHUB_DIR ..."
+    git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
+    ok "Cloned."
+fi
+
+# ── Step 4: Virtual environment + install ─────────────────────────────────────
+section "Virtual environment"
+
+if [[ ! -x "$VENV_PYTHON" ]]; then
     info "Creating .venv ..."
     "$PYTHON" -m venv "$VENV_DIR"
     ok "Venv created."
+else
+    ok "Venv exists — reusing."
 fi
 
 info "Upgrading pip and setuptools ..."
 "$VENV_PYTHON" -m pip install --upgrade pip setuptools --quiet
 
 info "Installing leafhub[manage] ..."
-"$VENV_PIP" install -e "$SCRIPT_DIR[manage]" --quiet
+"$VENV_PIP" install -e "$LEAFHUB_DIR[manage]" --quiet
 ok "Package installed."
 
-# ── Step 4: CLI registration ──────────────────────────────────────────────────
-section "Step 4 / 4  —  CLI registration"
-
-LEAFHUB_BIN="$VENV_DIR/bin/leafhub"
-LEAFHUB_LINK="$BIN_DIR/leafhub"
+# ── Step 5: CLI registration ──────────────────────────────────────────────────
+section "PATH"
 
 if [[ ! -x "$LEAFHUB_BIN" ]]; then
     fail "Entry point not found after install: $LEAFHUB_BIN"
@@ -109,7 +176,6 @@ mkdir -p "$BIN_DIR"
 ln -sf "$LEAFHUB_BIN" "$LEAFHUB_LINK"
 ok "Linked: $LEAFHUB_LINK → $LEAFHUB_BIN"
 
-# Persist ~/.local/bin in shell rc files
 MARKER='# >>> leafhub PATH >>>'
 ENDMARK='# <<< leafhub PATH <<<'
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
@@ -124,9 +190,7 @@ for rc in "${RC_FILES[@]}"; do
 done
 
 if [[ "$PATH_PERSISTED" -eq 0 ]]; then
-    # ~/.bashrc didn't exist — create it
-    RC="$HOME/.bashrc"
-    printf '\n%s\n%s\n%s\n' "$MARKER" "$PATH_LINE" "$ENDMARK" >> "$RC"
+    printf '\n%s\n%s\n%s\n' "$MARKER" "$PATH_LINE" "$ENDMARK" >> "$HOME/.bashrc"
     info "Created ~/.bashrc with PATH entry"
     PATH_PERSISTED=1
 fi
@@ -146,6 +210,8 @@ else
     echo -e "    ${GREEN}leafhub --help${NC}"
 fi
 echo ""
-echo -e "  ${MUTED}Data stored at: ~/.leafhub/${NC}"
-echo -e "  ${MUTED}To uninstall:   ./install.sh --uninstall${NC}"
+echo -e "  ${MUTED}Install dir:  $LEAFHUB_DIR${NC}"
+echo -e "  ${MUTED}Data stored:  ~/.leafhub/${NC}"
+echo -e "  ${MUTED}To update:    git -C \"$LEAFHUB_DIR\" pull${NC}"
+echo -e "  ${MUTED}To uninstall: rm \"$LEAFHUB_LINK\" && rm -rf \"$LEAFHUB_DIR\"${NC}"
 echo ""

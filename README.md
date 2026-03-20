@@ -43,32 +43,28 @@ Manage UI / CLI                  LeafHub                    Your Project
 | Requirement | Version | Notes |
 |---|---|---|
 | Python | 3.11+ | `brew install python@3.12` · `sudo apt install python3.12 python3.12-venv` · [python.org](https://www.python.org/downloads/) |
-| Git | any | For cloning the repository |
+| Git | any | Required — the installer clones the repo |
 | Node.js | 18+ | Optional — only needed to rebuild the Web UI from source |
 
 ---
 
 ### macOS / Linux / WSL
 
-Clone and run the one-step installer:
-
 ```bash
-git clone https://github.com/Rebas9512/Leafhub.git
-cd Leafhub
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.sh | bash
 ```
 
-Open a new terminal after install completes, then jump to [After install](#after-install).
+The installer prompts for an install directory (default: `~/leafhub`), clones the repo, creates a virtual environment, and registers `leafhub` on your PATH.
 
-**Installer options** (prefix before `./install.sh`):
+**Options** (set before the pipe):
 
 | Variable | Effect |
 |---|---|
-| `LEAFHUB_NO_SETUP=1` | Skip the post-install first-run hint |
+| `LEAFHUB_DIR=~/tools/leafhub` | Custom install directory |
 | `NO_COLOR=1` | Disable colour output |
 
 ```bash
-LEAFHUB_NO_SETUP=1 NO_COLOR=1 ./install.sh
+LEAFHUB_DIR=~/tools/leafhub curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.sh | bash
 ```
 
 ---
@@ -76,15 +72,13 @@ LEAFHUB_NO_SETUP=1 NO_COLOR=1 ./install.sh
 ### Windows — PowerShell
 
 ```powershell
-git clone https://github.com/Rebas9512/Leafhub.git
-cd Leafhub
-.\install.ps1
+irm https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.ps1 | iex
 ```
 
-If your execution policy blocks unsigned scripts, PowerShell will prompt you, or run first:
+To pass options, use the scriptblock form:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process RemoteSigned
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.ps1))) -InstallDir C:\leafhub
 ```
 
 ---
@@ -92,12 +86,10 @@ Set-ExecutionPolicy -Scope Process RemoteSigned
 ### Windows — CMD
 
 ```cmd
-git clone https://github.com/Rebas9512/Leafhub.git
-cd Leafhub
-install.cmd
+curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
 
-`install.cmd` delegates to `install.ps1` automatically.
+`install.cmd` downloads `install.ps1` from GitHub and executes it via PowerShell.
 
 ---
 
@@ -105,9 +97,10 @@ install.cmd
 
 | Location | Contents |
 |---|---|
-| `<repo>/.venv/` | Isolated Python environment with all dependencies |
+| `~/leafhub/` | Source code (cloned repo, configurable via `LEAFHUB_DIR`) |
+| `~/leafhub/.venv/` | Isolated Python environment with all dependencies |
 | `~/.local/bin/leafhub` | CLI symlink (macOS / Linux / WSL) |
-| `.venv\Scripts\leafhub.exe` added to user `PATH` | CLI entry point (Windows) |
+| `~/leafhub/.venv\Scripts\leafhub.exe` on user `PATH` | CLI entry point (Windows) |
 | `~/.leafhub/` | Encrypted key store (`providers.enc`), SQLite DB, master key |
 
 ---
@@ -122,6 +115,16 @@ Open a **new terminal** (PATH update takes effect on next launch), then:
 | `leafhub provider add` | Register your first API key |
 | `leafhub project create my-app` | Create a project and get a one-time token |
 | `leafhub manage` | Start the Web UI at `http://localhost:8765` |
+
+---
+
+### Update
+
+```bash
+git -C ~/leafhub pull
+```
+
+The editable install (`pip install -e`) means updates take effect immediately — no reinstall needed.
 
 ---
 
@@ -145,9 +148,9 @@ cd ui && npm install && npm run build && cd ..
 
 ---
 
-### `setup.sh` — advanced / CI usage
+### `setup.sh` — developer / CI usage
 
-`setup.sh` is a superset of `install.sh` with extra control flags. Use it for CI pipelines or when you need to manage the environment explicitly:
+`setup.sh` runs from a cloned repo and gives more explicit control. Use it for CI or local development:
 
 ```bash
 ./setup.sh [flags]
@@ -160,8 +163,6 @@ cd ui && npm install && npm run build && cd ..
 | `--doctor` | Run environment diagnostics only, then exit |
 | `--uninstall` | Remove the CLI symlink, PATH entries, and `.venv` |
 
-`install.ps1` accepts the same options as PowerShell switches: `-Reinstall`, `-Uninstall`, `-Headless`.
-
 ---
 
 ### Uninstall
@@ -169,18 +170,24 @@ cd ui && npm install && npm run build && cd ..
 **macOS / Linux / WSL:**
 
 ```bash
-./setup.sh --uninstall          # removes CLI symlink, PATH entries, .venv
+rm ~/.local/bin/leafhub
+rm -rf ~/leafhub/               # remove install dir
 rm -rf ~/.leafhub/              # also delete stored keys and DB (optional)
 ```
 
 **Windows:**
 
 ```powershell
-.\install.ps1 -Uninstall
+# Remove install dir and PATH entry — replace path if you chose a custom dir
+$scripts = "$env:USERPROFILE\leafhub\.venv\Scripts"
+[Environment]::SetEnvironmentVariable("Path",
+  ([Environment]::GetEnvironmentVariable("Path","User") -split ";" |
+   Where-Object { $_ -ne $scripts }) -join ";", "User")
+Remove-Item -Recurse "$env:USERPROFILE\leafhub"
 Remove-Item -Recurse $env:USERPROFILE\.leafhub   # also delete stored keys (optional)
 ```
 
-The uninstall step does **not** touch `~/.leafhub/` — your encrypted keys and project tokens are preserved unless you delete the directory manually.
+`~/.leafhub/` (your encrypted keys and project tokens) is **not** removed unless you delete it manually.
 
 ---
 
