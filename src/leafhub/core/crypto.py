@@ -80,7 +80,10 @@ def _save_master_key_keyring(key: bytes) -> bool:
         import keyring
         keyring.set_password(_KEYRING_SERVICE, _KEYRING_USERNAME,
                              base64.b64encode(key).decode())
-        return True
+        # Verify the key was actually persisted — null/stub backends accept
+        # set_password without raising but return nothing on get_password,
+        # which would cause a different key to be generated on the next call.
+        return keyring.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME) is not None
     except Exception:
         return False
 
