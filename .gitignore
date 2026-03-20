@@ -30,9 +30,6 @@ ui/dist/
 # Dotfiles written into project roots by `leafhub project link`
 .leafhub
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
-tests/
-
 # ── Claude Code ───────────────────────────────────────────────────────────────
 .claude/
 
