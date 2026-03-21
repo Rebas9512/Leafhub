@@ -218,7 +218,7 @@ _leafhub_ensure() {
 
 # ── Public API ────────────────────────────────────────────────────────────────
 #
-# leafhub_setup_project <name> [path]
+# leafhub_setup_project <name> [path [alias]]
 #
 # The single function that new projects call from their setup.sh.
 # Everything else is handled internally.
@@ -234,6 +234,13 @@ _leafhub_ensure() {
 #          Defaults to the current working directory: $(pwd).
 #          Typically: pass "$SCRIPT_DIR" (the directory containing setup.sh).
 #
+#   alias  Optional.  The binding alias your project queries at runtime via
+#          hub.get_key("<alias>") or the LEAFHUB_ALIAS env var.
+#          Defaults to "default" when omitted.
+#          Pass this when your project uses a custom alias (e.g. "rewrite"):
+#            leafhub_setup_project "my-project" "$SCRIPT_DIR" "rewrite"
+#          This must match what your runtime code passes to hub.get_key().
+#
 # ENVIRONMENT
 #   LEAFHUB_HEADLESS=1   Skip all interactive prompts.
 #                        Set before calling if your setup.sh has --headless.
@@ -242,13 +249,18 @@ _leafhub_ensure() {
 #   0   Registration and binding completed successfully.
 #   1   LeafHub install failed, or `leafhub register` returned non-zero.
 #
-# EXAMPLE
+# EXAMPLE — default alias
 #   leafhub_setup_project "my-project" "$SCRIPT_DIR" \
+#       || fail "LeafHub registration failed."
+#
+# EXAMPLE — custom alias
+#   leafhub_setup_project "my-project" "$SCRIPT_DIR" "rewrite" \
 #       || fail "LeafHub registration failed."
 #
 leafhub_setup_project() {
     local _name="${1:?leafhub_setup_project: project name required}"
     local _path="${2:-$(pwd)}"
+    local _alias="${3:-}"   # optional; if omitted, leafhub register uses "default"
 
     # Ensure the binary exists; install it automatically if not found.
     _leafhub_ensure || return 1
@@ -258,6 +270,11 @@ leafhub_setup_project() {
     local _headless_flag=""
     [[ "${LEAFHUB_HEADLESS:-0}" == "1" ]] && _headless_flag="--headless"
 
+    # Pass --alias when the project uses a non-default binding alias.
+    local _alias_flag=""
+    [[ -n "$_alias" ]] && _alias_flag="--alias $_alias"
+
     # Run the full registration flow (create/re-link → provider setup → bind).
-    "$LEAFHUB_BIN" register "$_name" --path "$_path" $_headless_flag
+    # shellcheck disable=SC2086
+    "$LEAFHUB_BIN" register "$_name" --path "$_path" $_headless_flag $_alias_flag
 }

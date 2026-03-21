@@ -237,6 +237,35 @@ _VENV_STDLIB_NAMES = frozenset({
 })
 
 
+def _get_project_entry_points(project_dir: Path) -> frozenset[str] | None:
+    """Return the CLI names declared in ``pyproject.toml [project.scripts]``.
+
+    Used as a precise whitelist by :func:`_detect_project_cli` so that only
+    the project's own commands are registered to ``~/.local/bin/``, not every
+    transitive-dependency CLI that lands in ``.venv/bin/``.
+
+    Returns ``None`` when ``pyproject.toml`` is absent, the ``[project.scripts]``
+    table is empty/missing, or no TOML parser is available.  The caller falls
+    back to the stdlib-exclusion heuristic in that case.
+    """
+    pyproject = project_dir / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        import tomllib                      # Python ≥ 3.11 stdlib
+    except ImportError:
+        try:
+            import tomli as tomllib         # fallback: pip install tomli
+        except ImportError:
+            return None
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        scripts: dict = data.get("project", {}).get("scripts", {})
+        return frozenset(scripts.keys()) if scripts else None
+    except Exception:
+        return None
+
+
 def _detect_project_cli(project_dir: Path) -> list[tuple[str, Path]]:
     """Return ``(name, venv_path)`` for project CLI executables not yet in ``~/.local/bin``.
 
@@ -245,9 +274,13 @@ def _detect_project_cli(project_dir: Path) -> list[tuple[str, Path]]:
     LeafHub.  Projects without ``setup.sh`` are treated as having no CLI to
     register (e.g. libraries or projects that manage their PATH themselves).
 
-    Scans ``<project_dir>/.venv/bin/`` for executable files that are not
-    standard Python-venv tools, then filters out any that are already
-    symlinked (and point into this project) in ``~/.local/bin/``.
+    **Filtering (most-specific to least-specific)**:
+
+    1. If ``pyproject.toml`` declares ``[project.scripts]``, only those names
+       are registered.  This is the precise whitelist — transitive-dependency
+       CLIs (uvicorn, tqdm, accelerate …) are ignored automatically.
+    2. Otherwise, fall back to the stdlib-prefix/name exclusion heuristic for
+       projects that don't use pyproject.toml.
 
     Returns an empty list on non-POSIX platforms, when ``setup.sh`` is absent,
     or when no venv is present.
@@ -261,15 +294,22 @@ def _detect_project_cli(project_dir: Path) -> list[tuple[str, Path]]:
     if not venv_bin.is_dir():
         return []
 
+    entry_points = _get_project_entry_points(project_dir)  # None → use heuristic
     resolved_project = project_dir.resolve()
     local_bin = Path.home() / ".local" / "bin"
 
     result: list[tuple[str, Path]] = []
     for entry in sorted(venv_bin.iterdir()):
-        if any(entry.name.startswith(p) for p in _VENV_STDLIB_PREFIXES):
-            continue
-        if entry.name in _VENV_STDLIB_NAMES:
-            continue
+        if entry_points is not None:
+            # Precise whitelist: only register declared entry points.
+            if entry.name not in entry_points:
+                continue
+        else:
+            # Heuristic fallback: exclude Python/pip stdlib tooling.
+            if any(entry.name.startswith(p) for p in _VENV_STDLIB_PREFIXES):
+                continue
+            if entry.name in _VENV_STDLIB_NAMES:
+                continue
         if not entry.is_file() or not os.access(entry, os.X_OK):
             continue
         # Skip if already symlinked from ~/.local/bin into this project.
