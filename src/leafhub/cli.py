@@ -238,7 +238,8 @@ def cmd_provider_delete(args: argparse.Namespace) -> None:
 
 def cmd_project_create(args: argparse.Namespace) -> None:
     from .manage.projects import (
-        _distribute_integration_files, _is_integrated, _write_dotfile,
+        _detect_project_cli, _distribute_integration_files,
+        _is_integrated, _register_cli_symlinks, _write_dotfile,
     )
 
     name          = args.project_name
@@ -262,7 +263,10 @@ def cmd_project_create(args: argparse.Namespace) -> None:
                     _write_dotfile(link_path, name, raw_token)
                     if not _is_integrated(link_path):
                         _distribute_integration_files(link_path)
+                    cli_registered = _register_cli_symlinks(link_path)
                     print(f"✓ Project '{name}' already exists — re-linked to {link_path}.")
+                    if cli_registered:
+                        print(f"✓ CLI registered: {', '.join(cli_registered)}")
                 else:
                     print(f"✓ Project '{name}' already exists — no path change.")
                 return
@@ -275,11 +279,14 @@ def cmd_project_create(args: argparse.Namespace) -> None:
                 _distribute_integration_files(link_path)
                 if not _is_integrated(link_path) else []
             )
+            cli_registered = _register_cli_symlinks(link_path)
             store.set_project_path(project.id, str(link_path))
             print(f"✓ Project '{name}' created and linked to {link_path}.")
             print(f"  .leafhub written — project auto-detects credentials on startup.")
             if distributed:
                 print(f"  Integration files written: {', '.join(distributed)}.")
+            if cli_registered:
+                print(f"✓ CLI registered: {', '.join(cli_registered)}")
         else:
             print(f"✓ Project '{name}' created.")
             _print_token_box(raw_token)
@@ -294,7 +301,8 @@ def cmd_project_create(args: argparse.Namespace) -> None:
 
 def cmd_project_link(args: argparse.Namespace) -> None:
     from .manage.projects import (
-        _distribute_integration_files, _is_integrated, _write_dotfile,
+        _detect_project_cli, _distribute_integration_files,
+        _is_integrated, _register_cli_symlinks, _write_dotfile,
     )
 
     name      = args.project_name
@@ -318,11 +326,14 @@ def cmd_project_link(args: argparse.Namespace) -> None:
             _distribute_integration_files(link_path)
             if not _is_integrated(link_path) else []
         )
+        cli_registered = _register_cli_symlinks(link_path)
 
         print(f"✓ Project '{name}' linked to {link_path}.")
         print(f"  .leafhub written — token rotated, old token invalidated.")
         if distributed:
             print(f"  Integration files written: {', '.join(distributed)}.")
+        if cli_registered:
+            print(f"✓ CLI registered: {', '.join(cli_registered)}")
 
         _interactive_bind_wizard(store, hub_dir, p.id, name)
     finally:
@@ -732,6 +743,47 @@ def cmd_manage(args: argparse.Namespace) -> None:
             webbrowser.open(url)
         threading.Thread(target=_open, daemon=True).start()
 
+    def _free_port(p: int) -> None:
+        """Kill any process already bound to *p* so we can start cleanly."""
+        import socket as _sock
+        import sys as _sys
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                return  # port is free
+        print(f"  Port {p} already in use — stopping existing process...")
+        killed = False
+        if _sys.platform == "win32":
+            # netstat to find PID, then taskkill
+            import re as _re
+            out = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True,
+            ).stdout
+            for line in out.splitlines():
+                if f":{p}" in line and "LISTENING" in line:
+                    pid = _re.split(r"\s+", line.strip())[-1]
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                    killed = True
+                    break
+        else:
+            # fuser works on Linux; lsof fallback covers macOS
+            if shutil.which("fuser"):
+                result = subprocess.run(
+                    ["fuser", "-k", f"{p}/tcp"],
+                    capture_output=True,
+                )
+                killed = result.returncode == 0
+            elif shutil.which("lsof"):
+                pids = subprocess.run(
+                    ["lsof", "-ti", f"tcp:{p}"],
+                    capture_output=True, text=True,
+                ).stdout.split()
+                for pid in pids:
+                    subprocess.run(["kill", pid], capture_output=True)
+                killed = bool(pids)
+        if killed:
+            time.sleep(0.5)  # give the OS a moment to release the socket
+
     api_url = f"http://127.0.0.1:{port}"
 
     if dev:
@@ -743,6 +795,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
         print(f"  FastAPI backend: {api_url}")
         print(f"  API docs       : {api_url}/admin/docs")
         print("Press Ctrl+C to stop.\n")
+        _free_port(port)
         vite = subprocess.Popen(["npm", "run", "dev"], cwd=ui_dir)
         try:
             if not no_browser:
@@ -755,6 +808,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
             print("\nServer stopped.")
     else:
         _build_ui()
+        _free_port(port)
         print(f"Starting LeafHub manage server  →  {api_url}")
         print(f"  Web UI       : {api_url}")
         print(f"  API docs     : {api_url}/admin/docs")
@@ -1061,7 +1115,8 @@ def cmd_register(args: argparse.Namespace) -> None:
     import subprocess
 
     from .manage.projects import (
-        _distribute_integration_files, _is_integrated, _write_dotfile,
+        _detect_project_cli, _distribute_integration_files,
+        _is_integrated, _register_cli_symlinks, _write_dotfile,
     )
 
     name     = args.project_name
@@ -1098,7 +1153,31 @@ def cmd_register(args: argparse.Namespace) -> None:
     finally:
         store.close()
 
-    # ── 2. Check providers ────────────────────────────────────────────────────
+    # ── 2. CLI registration ───────────────────────────────────────────────────
+    # Detect executables in <project>/.venv/bin/ that aren't yet symlinked in
+    # ~/.local/bin/.  In headless mode (or non-interactive stdin) we register
+    # automatically; otherwise we ask once before proceeding.
+    unregistered = _detect_project_cli(path)
+    if unregistered:
+        names = [n for n, _ in unregistered]
+        do_register = headless or not sys.stdin.isatty()
+        if not do_register:
+            print()
+            print(f"  Detected CLI tool(s) not yet registered: {', '.join(names)}")
+            print("  Register to ~/.local/bin? [Y/n] ", end="", flush=True)
+            try:
+                ans = input().strip().lower()
+            except EOFError:
+                ans = ""
+            do_register = ans in ("", "y", "yes")
+        if do_register:
+            registered = _register_cli_symlinks(path)
+            if registered:
+                print(f"✓ CLI registered: {', '.join(registered)}")
+        else:
+            print(f"  Skipped. Register later: leafhub project register-cli <project-id>")
+
+    # ── 3. Check providers ────────────────────────────────────────────────────
     store, _ = _open_store()
     providers = store.list_providers()
     store.close()

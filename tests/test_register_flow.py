@@ -159,7 +159,7 @@ class TestCmdRegister(unittest.TestCase):
         s = self._reload_store()
         try:
             p = s.find_project_by_name("path-app")
-            self.assertEqual(str(p.path), str(self.proj_dir))
+            self.assertEqual(Path(p.path).resolve(), self.proj_dir.resolve())
         finally:
             s.close()
 
@@ -211,7 +211,7 @@ class TestCmdRegister(unittest.TestCase):
         try:
             projects = [p for p in s.list_projects() if p.name == "relink-app"]
             self.assertEqual(len(projects), 1, "re-link must not create a duplicate")
-            self.assertEqual(str(projects[0].path), str(second_dir))
+            self.assertEqual(Path(projects[0].path).resolve(), second_dir.resolve())
         finally:
             s.close()
 
@@ -407,7 +407,7 @@ class TestIfNotExists(unittest.TestCase):
         s = self._reload_store()
         try:
             p = s.find_project_by_name("path-update")
-            self.assertEqual(str(p.path), str(second_dir))
+            self.assertEqual(Path(p.path).resolve(), second_dir.resolve())
         finally:
             s.close()
 

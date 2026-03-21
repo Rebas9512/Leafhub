@@ -226,6 +226,84 @@ def _remove_project_files(project_dir: Path) -> list[str]:
     return removed
 
 
+# ── CLI detection & registration ──────────────────────────────────────────────
+
+#: venv executables that belong to Python/pip itself, not to the project.
+_VENV_STDLIB_PREFIXES = ("python", "pip", "_", ".")
+_VENV_STDLIB_NAMES = frozenset({
+    "activate", "activate.csh", "activate.fish",
+    "easy_install", "wheel", "pydoc", "pydoc3",
+    "normalizer", "chardetect", "f2py",
+})
+
+
+def _detect_project_cli(project_dir: Path) -> list[tuple[str, Path]]:
+    """Return ``(name, venv_path)`` for project CLI executables not yet in ``~/.local/bin``.
+
+    Scans ``<project_dir>/.venv/bin/`` for executable files that are not
+    standard Python-venv tools, then filters out any that are already
+    symlinked (and point into this project) in ``~/.local/bin/``.
+
+    Returns an empty list on non-POSIX platforms or when no venv is present.
+    """
+    if os.name != "posix":
+        return []
+    venv_bin = project_dir / ".venv" / "bin"
+    if not venv_bin.is_dir():
+        return []
+
+    resolved_project = project_dir.resolve()
+    local_bin = Path.home() / ".local" / "bin"
+
+    result: list[tuple[str, Path]] = []
+    for entry in sorted(venv_bin.iterdir()):
+        if any(entry.name.startswith(p) for p in _VENV_STDLIB_PREFIXES):
+            continue
+        if entry.name in _VENV_STDLIB_NAMES:
+            continue
+        if not entry.is_file() or not os.access(entry, os.X_OK):
+            continue
+        # Skip if already symlinked from ~/.local/bin into this project.
+        link = local_bin / entry.name
+        if link.is_symlink():
+            try:
+                if link.resolve().is_relative_to(resolved_project):
+                    continue
+            except ValueError:
+                pass
+        result.append((entry.name, entry))
+    return result
+
+
+def _register_cli_symlinks(project_dir: Path) -> list[str]:
+    """Create ``~/.local/bin`` symlinks for unregistered project CLI tools.
+
+    Calls :func:`_detect_project_cli` and creates one symlink per detected
+    tool.  Existing symlinks that point elsewhere are replaced.
+
+    Returns the list of CLI names that were successfully registered.
+    Non-fatal errors are logged as warnings.
+    """
+    unregistered = _detect_project_cli(project_dir)
+    if not unregistered:
+        return []
+
+    local_bin = Path.home() / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+
+    registered: list[str] = []
+    for name, target in unregistered:
+        link = local_bin / name
+        try:
+            if link.is_symlink():
+                link.unlink()   # replace stale / wrong symlink
+            link.symlink_to(target)
+            registered.append(name)
+        except OSError as exc:
+            log.warning("Could not create CLI symlink %s → %s: %s", link, target, exc)
+    return registered
+
+
 # ── Installer registration cleanup ────────────────────────────────────────────
 
 #: Shell RC files that project installers typically add PATH entries to.
@@ -399,21 +477,25 @@ async def create_project(request: Request, body: ProjectCreateRequest):
                  for b in body.bindings],
             )
         distributed: list[str] = []
+        cli_registered: list[str] = []
         if link_dir is not None:
             # Write dotfile first; only update DB path if write succeeds.
             _write_dotfile(link_dir, body.name, raw_token)
             if not _is_integrated(link_dir):
                 distributed = _distribute_integration_files(link_dir)
+            cli_registered = _register_cli_symlinks(link_dir)
             store.set_project_path(project.id, str(link_dir))
         project = store.get_project(project.id)
-        return project, raw_token, distributed
+        return project, raw_token, distributed, cli_registered
 
-    project, raw_token, distributed = await asyncio.to_thread(_create)
+    project, raw_token, distributed, cli_registered = await asyncio.to_thread(_create)
     result = _project_dict(project)
     if link_dir is None:
         result["token"] = raw_token   # shown ONCE
     if distributed:
         result["files_distributed"] = distributed
+    if cli_registered:
+        result["cli_registered"] = cli_registered
     return result
 
 
@@ -454,7 +536,7 @@ async def update_project(request: Request, project_id: str,
     return _project_dict(p)
 
 
-@router.delete("/projects/{project_id}", status_code=204)
+@router.delete("/projects/{project_id}")
 async def delete_project(request: Request, project_id: str):
     store = _store(request)
     try:
@@ -541,9 +623,10 @@ async def link_project(request: Request, project_id: str, body: LinkRequest):
         distributed: list[str] = []
         if not _is_integrated(project_dir):
             distributed = _distribute_integration_files(project_dir)
-        return p, str(dotfile), distributed
+        cli_registered = _register_cli_symlinks(project_dir)
+        return p, str(dotfile), distributed, cli_registered
 
-    project, dotfile_path, distributed = await asyncio.to_thread(_link)
+    project, dotfile_path, distributed, cli_registered = await asyncio.to_thread(_link)
     resp: dict = {
         "linked":  True,
         "path":    str(project_dir),
@@ -552,11 +635,14 @@ async def link_project(request: Request, project_id: str, body: LinkRequest):
     }
     if distributed:
         resp["files_distributed"] = distributed
+    if cli_registered:
+        resp["cli_registered"] = cli_registered
     resp["message"] = (
         f"Project '{project.name}' linked to {project_dir}. "
         "The .leafhub file has been written — apps in that directory will "
         "auto-detect LeafHub on next startup."
         + (f" Integration files written: {', '.join(distributed)}." if distributed else "")
+        + (f" CLI registered: {', '.join(cli_registered)}." if cli_registered else "")
     )
     return resp
 

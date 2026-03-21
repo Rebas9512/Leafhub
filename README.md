@@ -249,7 +249,7 @@ Remove-Item -Recurse $env:USERPROFILE\.leafhub   # also delete stored keys (opti
 
 | File | Responsibility |
 |------|----------------|
-| `cli.py` | argparse CLI. Subcommands: `provider add/list/show/delete`, `project create/link/list/show/token/bind/unbind/delete`, `register`, `shell-helper`, `manage`, `status`. After `project create` and `project link`, an interactive binding wizard prompts the user to bind an existing provider or add a new one inline. Silently skipped in non-TTY environments. |
+| `cli.py` | argparse CLI. Subcommands: `provider add/list/show/delete`, `project create/link/list/show/token/bind/unbind/delete`, `register`, `shell-helper`, `manage`, `status`. `register` includes a CLI detection step: after linking, it scans `.venv/bin/` for project executables not yet in `~/.local/bin/` and prompts to register them (auto-registers in headless/non-TTY mode). After `project create` and `project link`, an interactive binding wizard prompts the user to bind an existing provider or add a new one inline. Silently skipped in non-TTY environments. `manage` automatically frees the target port if already in use before starting the server. |
 | `sdk.py` | `LeafHub` — runtime client for application code. Resolves the hub directory, verifies the project token, decrypts API keys, builds provider-specific auth headers. `from_directory()` auto-loads from a `.leafhub` dotfile. |
 | `probe.py` | Stdlib-only auto-detection module. `detect()` searches for a `.leafhub` dotfile, probes the manage server port, checks for the CLI binary and SDK. Returns a `ProbeResult` with convenience properties (`ready`, `can_link`, `open_sdk()`). Distributed as `leafhub_probe.py` when a project is linked. |
 | `register.sh` | Shell integration module (see **Project Integration Standard** below). Bundled into the Python package so `leafhub shell-helper` can output it without a network call. |
@@ -276,7 +276,7 @@ Requires `pip install 'leafhub[manage]'`.
 | `server.py` | FastAPI app factory. Lifespan hooks load the master key and open SQLite. Serves the compiled Vue UI from `ui/dist/`. Exposes `GET /health` and `GET /admin/status`. |
 | `auth.py` | Admin token middleware. Reads `LEAFHUB_ADMIN_TOKEN` from environment; all `/admin/*` routes require a matching Bearer token with constant-time comparison. Per-IP sliding-window rate limiter (5 failures → 5-minute lockout). |
 | `providers.py` | CRUD routes for providers. **Connectivity probe on create**: `POST /admin/providers` makes a GET request to the provider's endpoint before saving. Returns HTTP 422 with a diagnostic message if unreachable. |
-| `projects.py` | CRUD routes for projects. Token lifecycle: create (plaintext shown once), rotate, revoke. `POST /admin/projects/{id}/link` rotates the token, writes a `.leafhub` dotfile (chmod 600), and auto-distributes integration files (`register.sh` + `leafhub_probe.py`) to new project directories — directories that already contain `register.sh` are treated as already integrated and receive only the updated dotfile. `DELETE /admin/projects/{id}` performs a full clean-up before deleting the DB record: removes `.leafhub`, `leafhub_probe.py`, and `register.sh` from the linked directory, removes CLI symlinks in `~/.local/bin/` pointing into the project, and strips the project's venv PATH entries from shell RC files (macOS/Linux) or the User PATH registry key (Windows). Returns `{"deleted": true, "files_removed": [...], "registration_removed": [...]}`. |
+| `projects.py` | CRUD routes for projects. Token lifecycle: create (plaintext shown once), rotate, revoke. `POST /admin/projects/{id}/link` and `POST /admin/projects` (with `path`) rotate/create the token, write a `.leafhub` dotfile (chmod 600), auto-distribute integration files (`register.sh` + `leafhub_probe.py`) to new project directories, and **auto-register project CLI tools**: any executable in `.venv/bin/` that is not a standard Python/pip tool and not yet symlinked in `~/.local/bin/` gets a symlink created automatically. Response includes `"cli_registered": [...]` when symlinks were created. Directories that already contain `register.sh` are treated as already integrated and receive only the updated dotfile. `DELETE /admin/projects/{id}` performs a full clean-up: removes `.leafhub`, `leafhub_probe.py`, and `register.sh` from the linked directory, removes CLI symlinks in `~/.local/bin/` pointing into the project, and strips the project's venv PATH entries from shell RC files (macOS/Linux) or the User PATH registry key (Windows). Returns `{"deleted": true, "files_removed": [...], "registration_removed": [...]}`. |
 
 ---
 
@@ -327,16 +327,23 @@ The presence of `register.sh` in the project directory is the integration marker
    │      Writes .leafhub token file (chmod 600) into $SCRIPT_DIR
    │      Auto-adds .leafhub to .gitignore
    │
-   ├─ b) Provider setup (if no providers configured)
+   ├─ b) CLI registration (if .venv/bin/ contains project executables)
+   │      Scans $SCRIPT_DIR/.venv/bin/ for project CLI tools
+   │      (skips python*, pip*, activate, wheel, etc.)
+   │      Interactive: asks once before creating ~/.local/bin/ symlinks
+   │      Headless / non-TTY: registers automatically
+   │      Already registered → skipped
+   │
+   ├─ c) Provider setup (if no providers configured)
    │      Interactive: opens wizard to add provider name, URL, API key, model
    │      Headless: prints reminder and continues without binding
    │
-   ├─ c) Auto-bind provider
+   ├─ d) Auto-bind provider
    │      1 provider  → bound automatically under alias 'default'
    │      N providers → user picks one interactively
    │      Already bound → skipped
    │
-   └─ d) Distribute integration files (new projects only)
+   └─ e) Distribute integration files (new projects only)
           If register.sh is NOT already present in $SCRIPT_DIR:
             → copy register.sh  (shell integration module)
             → copy leafhub_probe.py  (stdlib-only runtime detection)

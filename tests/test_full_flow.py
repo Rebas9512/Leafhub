@@ -718,7 +718,8 @@ class TestProjectAPI:
     def test_delete_project(self, client):
         proj = client.post("/admin/projects", json={"name": "myapp"}).json()
         r = client.delete(f"/admin/projects/{proj['id']}")
-        assert r.status_code == 204
+        assert r.status_code == 200
+        assert r.json()["deleted"] is True
         assert client.get("/admin/projects").json()["data"] == []
 
     def test_delete_nonexistent_returns_404(self, client):
