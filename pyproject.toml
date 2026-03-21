@@ -54,5 +54,8 @@ leafhub = "leafhub.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+leafhub = ["register.sh"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

@@ -119,34 +119,87 @@ def _write_dotfile(project_dir: Path, project_name: str, raw_token: str) -> Path
     return dotfile
 
 
-# ── Probe file distributor ────────────────────────────────────────────────────
+# ── Integration file distribution ────────────────────────────────────────────
 
-_PROBE_COPY_NAME = "leafhub_probe.py"
+_PROBE_COPY_NAME   = "leafhub_probe.py"
+_REGISTER_SH_NAME  = "register.sh"
+
 # The canonical probe.py lives inside the leafhub package.
 _PROBE_SOURCE = Path(__file__).resolve().parents[1] / "probe.py"
 
 
+def _is_integrated(project_dir: Path) -> bool:
+    """Return True if *project_dir* already contains ``register.sh``.
+
+    Presence of ``register.sh`` indicates the project has previously been
+    integrated with LeafHub (its ``setup.sh`` sources the file).  In that
+    case we only refresh ``.leafhub`` — the integration files are already
+    in place and may have been customised.
+    """
+    return (project_dir / _REGISTER_SH_NAME).exists()
+
+
 def _copy_probe_to_project(project_dir: Path) -> None:
-    """
-    Copy ``leafhub/probe.py`` into *project_dir* as ``leafhub_probe.py``.
-
-    The copy is a standalone, self-contained Python file that developers can
-    read and adapt without referring back to the LeafHub source.  It is
-    overwritten on every link so it stays in sync with the installed version.
-
-    Failures are silently ignored — the dotfile is the critical artefact; the
-    probe copy is a convenience.
-    """
+    """Copy ``leafhub/probe.py`` into *project_dir* as ``leafhub_probe.py``."""
     dest = project_dir / _PROBE_COPY_NAME
     try:
         shutil.copy2(_PROBE_SOURCE, dest)
     except Exception:
-        pass   # probe copy is optional; never fail the link for this
+        pass   # non-fatal
+
+
+def _copy_register_sh_to_project(project_dir: Path) -> None:
+    """Copy ``register.sh`` (from package data) into *project_dir*.
+
+    Tries importlib.resources first (installed package / editable install),
+    then falls back to the repository root (development checkout only).
+    Failures are silently ignored — the dotfile is the critical artefact.
+    """
+    import importlib.resources as _pkg_res
+
+    dest = project_dir / _REGISTER_SH_NAME
+    try:
+        content = (
+            _pkg_res.files("leafhub")
+            .joinpath("register.sh")
+            .read_text(encoding="utf-8")
+        )
+        dest.write_text(content, encoding="utf-8")
+        return
+    except Exception:
+        pass
+
+    # Fallback: development checkout layout
+    # Path: src/leafhub/manage/projects.py → parents[3] = repo root
+    src = Path(__file__).resolve().parents[3] / "register.sh"
+    try:
+        shutil.copy2(src, dest)
+    except Exception:
+        pass
+
+
+def _distribute_integration_files(project_dir: Path) -> list[str]:
+    """Copy ``register.sh`` and ``leafhub_probe.py`` to a new project directory.
+
+    Called only when ``_is_integrated(project_dir)`` returns False — i.e. this
+    is the first time LeafHub is being set up in this directory.
+
+    Returns the list of filenames that were written (for use in response bodies
+    and CLI output).
+    """
+    _copy_probe_to_project(project_dir)
+    _copy_register_sh_to_project(project_dir)
+    # Report only files that are actually on disk after the operation.
+    distributed = []
+    for name in (_REGISTER_SH_NAME, _PROBE_COPY_NAME):
+        if (project_dir / name).exists():
+            distributed.append(name)
+    return distributed
 
 
 # ── Dotfile removal ───────────────────────────────────────────────────────────
 
-_FILES_TO_REMOVE = (_DOTFILE_NAME, _PROBE_COPY_NAME)
+_FILES_TO_REMOVE = (_DOTFILE_NAME, _PROBE_COPY_NAME, _REGISTER_SH_NAME)
 
 
 def _remove_project_files(project_dir: Path) -> list[str]:
@@ -173,6 +226,99 @@ def _remove_project_files(project_dir: Path) -> list[str]:
     return removed
 
 
+# ── Installer registration cleanup ────────────────────────────────────────────
+
+#: Shell RC files that project installers typically add PATH entries to.
+_RC_FILES = (".zprofile", ".zshrc", ".bashrc", ".bash_profile", ".profile")
+
+
+def _cleanup_installer_registration(project_dir: Path) -> list[str]:
+    """
+    Remove system-level registrations that the project's installer created.
+
+    This is called automatically on project delete so the host machine is left
+    in a clean state — only the project's source files remain.
+
+    Unix / macOS:
+      1. Symlinks in ``~/.local/bin/`` whose resolved target lives inside
+         *project_dir* (e.g. the ``trileaf`` command symlink).
+      2. Lines in shell RC files that reference ``<project_dir>/.venv/bin``
+         (the PATH export added by the installer).
+
+    Windows:
+      1. ``<project_dir>\\.venv\\Scripts`` entry removed from the User PATH
+         environment variable (HKCU\\Environment).
+
+    Returns a list of human-readable strings describing each item removed.
+    Silently skips entries it cannot remove and never raises.
+    """
+    removed: list[str] = []
+
+    if os.name == "posix":
+        # ── 1. CLI symlinks ────────────────────────────────────────────────────
+        # Resolve project_dir once so comparison works even when project_dir
+        # itself contains symlink components (e.g. /home/user/app → /mnt/data/app).
+        resolved_project_dir = project_dir.resolve()
+        local_bin = Path.home() / ".local" / "bin"
+        if local_bin.is_dir():
+            for entry in local_bin.iterdir():
+                try:
+                    if entry.is_symlink():
+                        resolved = entry.resolve()
+                        if resolved.is_relative_to(resolved_project_dir):
+                            entry.unlink()
+                            removed.append(f"~/.local/bin/{entry.name} (CLI symlink)")
+                except (OSError, ValueError):
+                    pass
+
+        # ── 2. Shell RC PATH lines ─────────────────────────────────────────────
+        # Match lines that export or prepend <project_dir>/.venv/bin to PATH.
+        # We match the directory string rather than the project name so we never
+        # accidentally strip unrelated entries in files we don't fully own.
+        venv_bin = str(project_dir / ".venv" / "bin")
+        for rc_name in _RC_FILES:
+            rc = Path.home() / rc_name
+            if not rc.exists():
+                continue
+            try:
+                original = rc.read_text(encoding="utf-8", errors="replace")
+                lines = original.splitlines(keepends=True)
+                filtered = [ln for ln in lines if venv_bin not in ln]
+                if len(filtered) < len(lines):
+                    rc.write_text("".join(filtered), encoding="utf-8")
+                    removed.append(f"~/{rc_name} (PATH entry)")
+            except OSError as exc:
+                log.warning("Could not clean %s: %s", rc, exc)
+
+    elif os.name == "nt":
+        # ── Windows User PATH ──────────────────────────────────────────────────
+        venv_scripts = str(project_dir / ".venv" / "Scripts").rstrip("\\")
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Environment",
+                0,
+                winreg.KEY_READ | winreg.KEY_WRITE,
+            )
+            try:
+                current_path, reg_type = winreg.QueryValueEx(key, "Path")
+                entries = [e for e in current_path.split(";") if e.strip()]
+                filtered = [
+                    e for e in entries
+                    if e.strip().rstrip("\\").lower() != venv_scripts.lower()
+                ]
+                if len(filtered) < len(entries):
+                    winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(filtered))
+                    removed.append(r".venv\Scripts (User PATH)")
+            finally:
+                winreg.CloseKey(key)
+        except (ImportError, OSError, PermissionError) as exc:
+            log.warning("Could not clean Windows User PATH: %s", exc)
+
+    return removed
+
+
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class BindingSchema(BaseModel):
@@ -182,10 +328,9 @@ class BindingSchema(BaseModel):
 
 
 class ProjectCreateRequest(BaseModel):
-    name:       str
-    bindings:   list[BindingSchema] = Field(default_factory=list)
-    path:       str | None = None   # optional: link to a local directory immediately
-    copy_probe: bool = True         # copy leafhub_probe.py to the project root
+    name:     str
+    bindings: list[BindingSchema] = Field(default_factory=list)
+    path:     str | None = None   # optional: link to a local directory immediately
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -195,8 +340,7 @@ class ProjectUpdateRequest(BaseModel):
 
 
 class LinkRequest(BaseModel):
-    path:       str    # absolute path to the project directory
-    copy_probe: bool = True  # copy leafhub_probe.py to the project root
+    path: str    # absolute path to the project directory
 
 
 def _store(request: Request):
@@ -254,23 +398,22 @@ async def create_project(request: Request, body: ProjectCreateRequest):
                   "model_override": b.model_override}
                  for b in body.bindings],
             )
+        distributed: list[str] = []
         if link_dir is not None:
             # Write dotfile first; only update DB path if write succeeds.
-            # This keeps the DB consistent with the filesystem.
             _write_dotfile(link_dir, body.name, raw_token)
-            if body.copy_probe:
-                _copy_probe_to_project(link_dir)
+            if not _is_integrated(link_dir):
+                distributed = _distribute_integration_files(link_dir)
             store.set_project_path(project.id, str(link_dir))
         project = store.get_project(project.id)
-        return project, raw_token
+        return project, raw_token, distributed
 
-    project, raw_token = await asyncio.to_thread(_create)
+    project, raw_token, distributed = await asyncio.to_thread(_create)
     result = _project_dict(project)
-    # Only include the raw token in the response when there is no linked
-    # directory — in that case it was written to .leafhub and never needs
-    # to be shown.
     if link_dir is None:
         result["token"] = raw_token   # shown ONCE
+    if distributed:
+        result["files_distributed"] = distributed
     return result
 
 
@@ -319,12 +462,22 @@ async def delete_project(request: Request, project_id: str):
     except KeyError:
         raise HTTPException(404, f"Project '{project_id}' not found")
 
-    def _delete():
+    def _delete() -> dict:
+        files_removed: list[str] = []
+        reg_removed: list[str] = []
         if p.path:
-            _remove_project_files(Path(p.path))
+            project_dir = Path(p.path)
+            files_removed = _remove_project_files(project_dir)
+            reg_removed   = _cleanup_installer_registration(project_dir)
         store.delete_project(project_id)
+        return {"files": files_removed, "registration": reg_removed}
 
-    await asyncio.to_thread(_delete)
+    result = await asyncio.to_thread(_delete)
+    return {
+        "deleted": True,
+        "files_removed": result["files"],
+        "registration_removed": result["registration"],
+    }
 
 
 @router.post("/projects/{project_id}/rotate-token")
@@ -385,25 +538,25 @@ async def link_project(request: Request, project_id: str, body: LinkRequest):
         store.set_project_path(project_id, str(project_dir))
         p = store.get_project(project_id)
         dotfile = _write_dotfile(project_dir, p.name, raw_token)
-        if body.copy_probe:
-            _copy_probe_to_project(project_dir)
-        return p, str(dotfile)
+        distributed: list[str] = []
+        if not _is_integrated(project_dir):
+            distributed = _distribute_integration_files(project_dir)
+        return p, str(dotfile), distributed
 
-    project, dotfile_path = await asyncio.to_thread(_link)
+    project, dotfile_path, distributed = await asyncio.to_thread(_link)
     resp: dict = {
         "linked":  True,
         "path":    str(project_dir),
         "dotfile": dotfile_path,
         "project": _project_dict(project),
     }
-    if body.copy_probe:
-        resp["probe_copy"] = str(project_dir / _PROBE_COPY_NAME)
+    if distributed:
+        resp["files_distributed"] = distributed
     resp["message"] = (
         f"Project '{project.name}' linked to {project_dir}. "
         "The .leafhub file has been written — apps in that directory will "
         "auto-detect LeafHub on next startup."
-        + (f" A standalone probe copy was written to {_PROBE_COPY_NAME}."
-           if body.copy_probe else "")
+        + (f" Integration files written: {', '.join(distributed)}." if distributed else "")
     )
     return resp
 

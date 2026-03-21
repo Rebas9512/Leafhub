@@ -730,26 +730,64 @@ class TestProbeCopyOnLink(unittest.TestCase):
         self.assertEqual(r.status_code, 201, r.text)
         self.assertTrue((self.proj_dir / "leafhub_probe.py").exists())
 
-    def test_relink_overwrites_probe_copy(self):
-        """Linking twice must overwrite the probe file (idempotent)."""
+    def test_relink_already_integrated_does_not_overwrite_files(self):
+        """
+        After the first link, register.sh is distributed to the project dir,
+        marking it as 'already integrated'.  A subsequent link must only update
+        .leafhub and must NOT overwrite integration files (probe, register.sh).
+
+        This allows projects to customise their local copies without having
+        LeafHub silently undo those changes on every re-link.
+        """
         p = self._create_project()
-        # First link
+        # First link — distributes register.sh + leafhub_probe.py
         self.client.post(
             f"/admin/projects/{p['id']}/link",
             json={"path": str(self.proj_dir)},
         )
-        first_mtime = (self.proj_dir / "leafhub_probe.py").stat().st_mtime
+        self.assertTrue((self.proj_dir / "register.sh").exists(),
+                        "first link must distribute register.sh")
+        self.assertTrue((self.proj_dir / "leafhub_probe.py").exists(),
+                        "first link must distribute leafhub_probe.py")
 
-        # Overwrite probe to verify it gets replaced
-        (self.proj_dir / "leafhub_probe.py").write_text("# stale", encoding="utf-8")
+        # Overwrite both files to simulate local customisation
+        (self.proj_dir / "leafhub_probe.py").write_text("# custom probe", encoding="utf-8")
+        (self.proj_dir / "register.sh").write_text("# custom register", encoding="utf-8")
 
-        # Second link
+        # Second link — project already has register.sh → should NOT overwrite
         self.client.post(
             f"/admin/projects/{p['id']}/link",
             json={"path": str(self.proj_dir)},
         )
-        src = (self.proj_dir / "leafhub_probe.py").read_text(encoding="utf-8")
-        self.assertNotEqual(src.strip(), "# stale", "probe copy was not refreshed on relink")
+        probe_src    = (self.proj_dir / "leafhub_probe.py").read_text(encoding="utf-8")
+        register_src = (self.proj_dir / "register.sh").read_text(encoding="utf-8")
+        self.assertEqual(probe_src.strip(),    "# custom probe",
+                         "re-link must not overwrite leafhub_probe.py when already integrated")
+        self.assertEqual(register_src.strip(), "# custom register",
+                         "re-link must not overwrite register.sh when already integrated")
+
+    def test_relink_without_register_sh_distributes_files(self):
+        """
+        A directory that was linked before register.sh existed (no register.sh
+        present) is treated as not yet integrated and receives integration files
+        on the next link.
+        """
+        p = self._create_project()
+        # Manually write only .leafhub — simulating a pre-register.sh link
+        from leafhub.manage.projects import _write_dotfile
+        raw_token = "lh-proj-" + "x" * 32
+        _write_dotfile(self.proj_dir, p["name"], raw_token)
+        self.assertFalse((self.proj_dir / "register.sh").exists())
+
+        # Link via API — no register.sh → should distribute
+        self.client.post(
+            f"/admin/projects/{p['id']}/link",
+            json={"path": str(self.proj_dir)},
+        )
+        self.assertTrue((self.proj_dir / "register.sh").exists(),
+                        "link must distribute register.sh to non-integrated dir")
+        self.assertTrue((self.proj_dir / "leafhub_probe.py").exists(),
+                        "link must distribute leafhub_probe.py to non-integrated dir")
 
     def test_no_probe_copy_when_no_path(self):
         """Creating a project without a path must not put leafhub_probe.py anywhere."""

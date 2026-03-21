@@ -54,7 +54,7 @@ export const projects = {
   rotate:     (id)          => req('POST',   `/admin/projects/${id}/rotate-token`),
   deactivate: (id)          => req('POST',   `/admin/projects/${id}/deactivate`),
   activate:   (id)          => req('POST',   `/admin/projects/${id}/activate`),
-  link:       (id, path, copyProbe = true) => req('POST', `/admin/projects/${id}/link`, { path, copy_probe: copyProbe }),
+  link:       (id, path) => req('POST', `/admin/projects/${id}/link`, { path }),
 }
 
 // ── System ────────────────────────────────────────────────────────────────────

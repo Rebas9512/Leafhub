@@ -9,6 +9,12 @@
     </div>
 
     <div v-if="error" class="error-banner">{{ error }}</div>
+    <div v-if="deleteResult" class="success-banner" style="margin-bottom:12px">
+      <strong>Project deleted.</strong>
+      <ul v-if="deleteResult.length" style="margin:4px 0 0 16px; padding:0; font-size:12px">
+        <li v-for="item in deleteResult" :key="item">{{ item }}</li>
+      </ul>
+    </div>
     <div v-if="loading" class="empty-state"><span class="spinner"></span></div>
 
     <div v-else-if="!items.length" class="empty-state">
@@ -109,14 +115,6 @@
           </p>
         </div>
 
-        <div v-if="!modal.id && form.path" class="field">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="form.copy_probe" />
-            Copy <code>leafhub_probe.py</code> to project root
-            <small>(standalone detection snippet — can be integrated directly)</small>
-          </label>
-        </div>
-
         <div v-if="modal.error" class="error-banner">{{ modal.error }}</div>
         <div class="modal-actions">
           <button class="btn-secondary" @click="closeModal">Cancel</button>
@@ -144,14 +142,6 @@
           <input v-model="linkModal.path" class="input"
                  :placeholder="`/home/user/${linkModal.projectName}`"
                  @keyup.enter="doLink" />
-        </div>
-
-        <div class="field">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="linkModal.copyProbe" />
-            Copy <code>leafhub_probe.py</code> to project root
-            <small>(standalone detection snippet — can be integrated directly)</small>
-          </label>
         </div>
 
         <div v-if="linkModal.error" class="error-banner">{{ linkModal.error }}</div>
@@ -224,14 +214,15 @@ const duplicateNames = computed(() => {
 })
 
 const modal = reactive({ open: false, id: null, error: '', saving: false })
-const form  = reactive({ name: '', bindings: [], path: '', copy_probe: true })
+const form  = reactive({ name: '', bindings: [], path: '' })
 
-const tokenModal = reactive({ open: false, token: '', rotated: false })
-const copied     = ref(false)
+const tokenModal   = reactive({ open: false, token: '', rotated: false })
+const copied       = ref(false)
+const deleteResult = ref(null)   // null = hidden; array = cleanup summary lines
 
 const linkModal = reactive({
   open: false, projectId: null, projectName: '', path: '',
-  copyProbe: true, saving: false, error: '', success: '',
+  saving: false, error: '', success: '',
 })
 
 async function load() {
@@ -249,7 +240,7 @@ function provLabel(id) {
 }
 
 function openCreate() {
-  Object.assign(form, { name: '', bindings: [], path: '', copy_probe: true })
+  Object.assign(form, { name: '', bindings: [], path: '' })
   Object.assign(modal, { open: true, id: null, error: '', saving: false })
 }
 
@@ -276,8 +267,7 @@ async function doSave() {
                  model_override: b.model_override || null }))
   const body = { name: form.name, bindings }
   if (!modal.id && form.path.trim()) {
-    body.path       = form.path.trim()
-    body.copy_probe = form.copy_probe
+    body.path = form.path.trim()
   }
   try {
     if (modal.id) {
@@ -298,8 +288,17 @@ async function doSave() {
 
 async function doDelete(p) {
   if (!confirm(`Delete project "${p.name}"? Its token will stop working immediately.`)) return
-  try { await projects.delete(p.id); await load() }
-  catch (e) { error.value = e.message }
+  deleteResult.value = null
+  try {
+    const res = await projects.delete(p.id)
+    const cleaned = [
+      ...(res?.files_removed        || []).map(f => `removed file: ${f}`),
+      ...(res?.registration_removed || []).map(r => `removed registration: ${r}`),
+    ]
+    deleteResult.value = cleaned
+    setTimeout(() => { deleteResult.value = null }, 8000)
+    await load()
+  } catch (e) { error.value = e.message }
 }
 
 async function doRotate(p) {
@@ -322,7 +321,7 @@ async function doRotate(p) {
 function openLink(p) {
   Object.assign(linkModal, {
     open: true, projectId: p.id, projectName: p.name,
-    path: p.path || '', copyProbe: true,
+    path: p.path || '',
     saving: false, error: '', success: '',
   })
 }
@@ -333,7 +332,7 @@ async function doLink() {
   linkModal.saving = true; linkModal.error = ''; linkModal.success = ''
   try {
     const res = await projects.link(
-      linkModal.projectId, linkModal.path.trim(), linkModal.copyProbe
+      linkModal.projectId, linkModal.path.trim()
     )
     linkModal.success = res.message || `Linked to ${linkModal.path}`
     await load()

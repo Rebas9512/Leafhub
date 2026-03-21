@@ -21,14 +21,19 @@ Usage:
 
     leafhub status
     leafhub manage [--port 8765]
+    leafhub clean
+    leafhub uninstall
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import sqlite3
 import sys
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -145,6 +150,15 @@ def cmd_provider_list(args: argparse.Namespace) -> None:
     providers = store.list_providers()
     store.close()
 
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps([
+            {"label": p.label, "api_format": p.api_format,
+             "default_model": p.default_model, "id": p.id}
+            for p in providers
+        ]))
+        return
+
     if not providers:
         print("No providers configured.")
         return
@@ -223,46 +237,68 @@ def cmd_provider_delete(args: argparse.Namespace) -> None:
 # ── Project commands ───────────────────────────────────────────────────────────
 
 def cmd_project_create(args: argparse.Namespace) -> None:
-    from .manage.projects import _copy_probe_to_project, _write_dotfile
+    from .manage.projects import (
+        _distribute_integration_files, _is_integrated, _write_dotfile,
+    )
 
-    name       = args.project_name
-    raw_path   = getattr(args, "path", None)
-    link_path  = Path(_strip_path_quotes(raw_path)).resolve() if raw_path else None
-    copy_probe = not getattr(args, "no_probe", False)
+    name          = args.project_name
+    raw_path      = getattr(args, "path", None)
+    link_path     = Path(_strip_path_quotes(raw_path)).resolve() if raw_path else None
+    skip_wizard   = getattr(args, "yes", False)
+    if_not_exists = getattr(args, "if_not_exists", False)
 
     if link_path is not None and not link_path.is_dir():
         _die(f"Link directory not found: {args.path}")
 
     store, hub_dir = _open_store()
     try:
+        # --if-not-exists: re-link silently if project already registered
+        if if_not_exists:
+            existing = store.find_project_by_name(name)
+            if existing is not None:
+                if link_path is not None:
+                    raw_token = store.rotate_token(existing.id)
+                    store.set_project_path(existing.id, str(link_path))
+                    _write_dotfile(link_path, name, raw_token)
+                    if not _is_integrated(link_path):
+                        _distribute_integration_files(link_path)
+                    print(f"✓ Project '{name}' already exists — re-linked to {link_path}.")
+                else:
+                    print(f"✓ Project '{name}' already exists — no path change.")
+                return
+
         project, raw_token = store.create_project(name)
 
         if link_path is not None:
             _write_dotfile(link_path, name, raw_token)
-            if copy_probe:
-                _copy_probe_to_project(link_path)
+            distributed = (
+                _distribute_integration_files(link_path)
+                if not _is_integrated(link_path) else []
+            )
             store.set_project_path(project.id, str(link_path))
             print(f"✓ Project '{name}' created and linked to {link_path}.")
             print(f"  .leafhub written — project auto-detects credentials on startup.")
-            if copy_probe:
-                print(f"  leafhub_probe.py copied to project root.")
+            if distributed:
+                print(f"  Integration files written: {', '.join(distributed)}.")
         else:
             print(f"✓ Project '{name}' created.")
             _print_token_box(raw_token)
             print("  Add to your project .env:")
             print(f"    LEAFHUB_TOKEN={raw_token}\n")
 
-        _interactive_bind_wizard(store, hub_dir, project.id, name)
+        if not skip_wizard:
+            _interactive_bind_wizard(store, hub_dir, project.id, name)
     finally:
         store.close()
 
 
 def cmd_project_link(args: argparse.Namespace) -> None:
-    from .manage.projects import _copy_probe_to_project, _write_dotfile
+    from .manage.projects import (
+        _distribute_integration_files, _is_integrated, _write_dotfile,
+    )
 
-    name       = args.project_name
-    link_path  = Path(_strip_path_quotes(args.path)).resolve()
-    copy_probe = not getattr(args, "no_probe", False)
+    name      = args.project_name
+    link_path = Path(_strip_path_quotes(args.path)).resolve()
 
     if not link_path.is_dir():
         _die(f"Directory not found: {args.path}")
@@ -278,13 +314,15 @@ def cmd_project_link(args: argparse.Namespace) -> None:
         store.set_project_path(p.id, str(link_path))
 
         _write_dotfile(link_path, name, raw_token)
-        if copy_probe:
-            _copy_probe_to_project(link_path)
+        distributed = (
+            _distribute_integration_files(link_path)
+            if not _is_integrated(link_path) else []
+        )
 
         print(f"✓ Project '{name}' linked to {link_path}.")
         print(f"  .leafhub written — token rotated, old token invalidated.")
-        if copy_probe:
-            print(f"  leafhub_probe.py copied to project root.")
+        if distributed:
+            print(f"  Integration files written: {', '.join(distributed)}.")
 
         _interactive_bind_wizard(store, hub_dir, p.id, name)
     finally:
@@ -420,10 +458,15 @@ def cmd_project_delete(args: argparse.Namespace) -> None:
         return
 
     if p.path:
-        from leafhub.manage.projects import _remove_project_files
-        removed = _remove_project_files(Path(p.path))
-        for fname in removed:
+        from leafhub.manage.projects import (
+            _remove_project_files,
+            _cleanup_installer_registration,
+        )
+        project_dir = Path(p.path)
+        for fname in _remove_project_files(project_dir):
             print(f"  removed {p.path}/{fname}")
+        for desc in _cleanup_installer_registration(project_dir):
+            print(f"  removed {desc}")
 
     store.delete_project(p.id)
     store.close()
@@ -608,6 +651,19 @@ def cmd_status(args: argparse.Namespace) -> None:
     projects  = store.list_projects()
     store.close()
 
+    if getattr(args, "json", False):
+        import json
+        bound_projects = sum(1 for p in projects if p.bindings)
+        print(json.dumps({
+            "providers":      len(providers),
+            "projects":       len(projects),
+            "bound_projects": bound_projects,
+            # ready = at least one provider exists; scripts may additionally
+            # check bound_projects > 0 when a binding is required.
+            "ready":          len(providers) > 0,
+        }))
+        return
+
     active_projects = sum(1 for p in projects if p.is_active)
     total_bindings  = sum(len(p.bindings) for p in projects)
 
@@ -730,19 +786,440 @@ def _default_model(api_format: str) -> str:
     }.get(api_format, "")
 
 
-# ── Uninstall ──────────────────────────────────────────────────────────────────
+# ── Double-confirmation helper ─────────────────────────────────────────────────
+
+def _confirm_twice(prompt1: str, prompt2: str) -> bool:
+    """Return True only after the user answers yes to two separate prompts."""
+    try:
+        a1 = input(prompt1).strip().lower()
+    except EOFError:
+        print("\nAborted.")
+        return False
+    if a1 not in ("y", "yes"):
+        print("Aborted.")
+        return False
+    try:
+        a2 = input(prompt2).strip().lower()
+    except EOFError:
+        print("\nAborted.")
+        return False
+    if a2 not in ("y", "yes"):
+        print("Aborted.")
+        return False
+    return True
+
+
+# ── Clean command ──────────────────────────────────────────────────────────────
+
+def cmd_clean(args: argparse.Namespace) -> None:
+    """Remove all providers and projects, including artifacts and CLI registrations."""
+    from .manage.projects import (
+        _cleanup_installer_registration,
+        _remove_project_files,
+    )
+
+    store, hub_dir = _open_store()
+    try:
+        providers = store.list_providers()
+        projects  = store.list_projects()
+    finally:
+        store.close()
+
+    if not providers and not projects:
+        print("Nothing to clean — no providers or projects configured.")
+        return
+
+    # Show what will be removed
+    print("\nThis will permanently remove:")
+    if providers:
+        print(f"  {len(providers)} provider(s) : {', '.join(p.label for p in providers)}")
+    if projects:
+        print(f"  {len(projects)} project(s)  : {', '.join(p.name for p in projects)}")
+    linked = [p for p in projects if p.path]
+    if linked:
+        dirs_word = "directory" if len(linked) == 1 else "directories"
+        print(
+            f"  Project artefacts (.leafhub, leafhub_probe.py, register.sh)"
+            f" from {len(linked)} linked {dirs_word}"
+        )
+        print("  CLI registrations (symlinks + shell PATH entries) for those projects")
+    print()
+
+    if not _confirm_twice(
+        "Remove all providers and projects? [y/N] ",
+        "This cannot be undone. Confirm again [y/N] ",
+    ):
+        return
+
+    store, hub_dir = _open_store()
+    try:
+        # Delete projects first (also removes bindings, preventing FK errors on provider delete)
+        for proj in projects:
+            if proj.path:
+                proj_dir = Path(proj.path)
+                for fname in _remove_project_files(proj_dir):
+                    print(f"  removed {proj.path}/{fname}")
+                for desc in _cleanup_installer_registration(proj_dir):
+                    print(f"  removed {desc}")
+            store.delete_project(proj.id)
+            print(f"  deleted project '{proj.name}'")
+
+        # Delete providers
+        for prov in providers:
+            try:
+                store.delete_provider(prov.id)
+            except Exception as exc:
+                log.warning("Could not delete provider '%s': %s", prov.label, exc)
+            print(f"  deleted provider '{prov.label}'")
+
+        # Wipe encrypted key store
+        try:
+            from .core.crypto import load_master_key, encrypt_providers
+            master_key = load_master_key(hub_dir)
+            encrypt_providers({}, master_key, hub_dir)
+        except Exception as exc:
+            log.warning("Could not wipe providers.enc: %s", exc)
+    finally:
+        store.close()
+
+    print(f"\n✓ Clean complete.")
+    print(f"  Data directory {hub_dir} is now empty.")
+    print("  LeafHub is still installed — run 'leafhub uninstall' to remove everything.")
+
+
+# ── Uninstall helpers ──────────────────────────────────────────────────────────
+
+def _remove_leafhub_self(install_dir: Path, hub_dir: Path) -> None:
+    """Remove LeafHub's own CLI registration, PATH block, data dir, and source tree."""
+    import shutil as _shutil
+
+    _MARKER   = "# >>> leafhub PATH >>>"
+    _ENDMARK  = "# <<< leafhub PATH <<<"
+    _RC_NAMES = (".zprofile", ".zshrc", ".bashrc", ".bash_profile", ".profile")
+
+    if os.name == "posix":
+        # 1. Remove CLI symlink
+        leafhub_link = Path.home() / ".local" / "bin" / "leafhub"
+        if leafhub_link.is_symlink():
+            try:
+                leafhub_link.unlink()
+                print(f"  removed {leafhub_link}")
+            except OSError as exc:
+                log.warning("Could not remove %s: %s", leafhub_link, exc)
+        else:
+            print(f"  (CLI symlink not found at {leafhub_link} — skipped)")
+
+        # 2. Remove leafhub PATH block from shell RC files
+        for rc_name in _RC_NAMES:
+            rc = Path.home() / rc_name
+            if not rc.exists():
+                continue
+            try:
+                original = rc.read_text(encoding="utf-8", errors="replace")
+                if _MARKER not in original:
+                    continue
+                lines = original.splitlines(keepends=True)
+                out, inside = [], False
+                for line in lines:
+                    if _MARKER in line:
+                        inside = True
+                        continue
+                    if _ENDMARK in line:
+                        inside = False
+                        continue
+                    if not inside:
+                        out.append(line)
+                rc.write_text("".join(out), encoding="utf-8")
+                print(f"  removed leafhub PATH block from ~/{rc_name}")
+            except OSError as exc:
+                log.warning("Could not clean %s: %s", rc, exc)
+
+    elif os.name == "nt":
+        # Windows: remove .venv\Scripts from User PATH
+        venv_scripts = str(install_dir / ".venv" / "Scripts").rstrip("\\")
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, r"Environment", 0,
+                winreg.KEY_READ | winreg.KEY_WRITE,
+            )
+            try:
+                current_path, reg_type = winreg.QueryValueEx(key, "Path")
+                entries  = [e for e in current_path.split(";") if e.strip()]
+                filtered = [
+                    e for e in entries
+                    if e.strip().rstrip("\\").lower() != venv_scripts.lower()
+                ]
+                if len(filtered) < len(entries):
+                    winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(filtered))
+                    print(r"  removed leafhub .venv\Scripts from User PATH")
+            finally:
+                winreg.CloseKey(key)
+        except (ImportError, OSError, PermissionError) as exc:
+            log.warning("Could not clean Windows User PATH: %s", exc)
+
+    # 3. Remove data directory (~/.leafhub/)
+    if hub_dir.exists():
+        try:
+            _shutil.rmtree(hub_dir)
+            print(f"  removed {hub_dir}")
+        except OSError as exc:
+            log.warning("Could not remove %s: %s", hub_dir, exc)
+
+    # 4. Remove source tree — do this last; the running process keeps its
+    #    already-loaded bytecode in memory so deletion is safe on POSIX.
+    if install_dir.is_dir() and (install_dir / "setup.sh").exists():
+        try:
+            _shutil.rmtree(install_dir)
+            print(f"  removed {install_dir}")
+        except OSError as exc:
+            log.warning("Could not remove install directory %s: %s", install_dir, exc)
+    else:
+        print(f"  (Install directory {install_dir} not found or unrecognised — skipped)")
+
+
+# ── Uninstall command ──────────────────────────────────────────────────────────
 
 def cmd_uninstall(args: argparse.Namespace) -> None:
-    """Delegate to setup.sh --uninstall."""
+    """Clean all data, remove LeafHub's CLI registration, and delete the source tree."""
+    from .core import default_hub_dir
+    from .manage.projects import (
+        _cleanup_installer_registration,
+        _remove_project_files,
+    )
+
+    install_dir = Path(__file__).resolve().parents[2]  # cli.py → leafhub/ → src/ → install root
+    hub_dir     = default_hub_dir()
+
+    # Preflight summary
+    store, _ = _open_store()
+    try:
+        providers = store.list_providers()
+        projects  = store.list_projects()
+    finally:
+        store.close()
+
+    print("\nLeafHub uninstall will:")
+    print(f"  1. Remove {len(providers)} provider(s) and {len(projects)} project(s)")
+    print("     (same as 'leafhub clean' — project artefacts + CLI registrations removed)")
+    print(f"  2. Remove the leafhub CLI symlink and PATH entries from shell RC files")
+    print(f"  3. Remove the data directory    : {hub_dir}")
+    print(f"  4. Remove the install directory : {install_dir}")
+    print()
+
+    if not _confirm_twice(
+        "Uninstall LeafHub completely? [y/N] ",
+        "This will delete all stored API keys and cannot be undone. Confirm [y/N] ",
+    ):
+        return
+
+    # Phase 1: clean projects and providers (no re-prompting)
+    print("\n── Phase 1: removing projects and providers ──")
+    store, _ = _open_store()
+    try:
+        for proj in projects:
+            if proj.path:
+                proj_dir = Path(proj.path)
+                for fname in _remove_project_files(proj_dir):
+                    print(f"  removed {proj.path}/{fname}")
+                for desc in _cleanup_installer_registration(proj_dir):
+                    print(f"  removed {desc}")
+            store.delete_project(proj.id)
+            print(f"  deleted project '{proj.name}'")
+
+        for prov in providers:
+            try:
+                store.delete_provider(prov.id)
+            except Exception as exc:
+                log.warning("Could not delete provider '%s': %s", prov.label, exc)
+            print(f"  deleted provider '{prov.label}'")
+    finally:
+        store.close()
+
+    if not providers and not projects:
+        print("  (nothing to remove)")
+
+    # Phase 2: remove LeafHub itself
+    print("\n── Phase 2: removing LeafHub installation ──")
+    _remove_leafhub_self(install_dir, hub_dir)
+
+    print("\n✓ LeafHub uninstalled.")
+    print("  Open a new terminal to reload your shell environment.")
+
+
+# ── Register command ───────────────────────────────────────────────────────────
+
+def cmd_register(args: argparse.Namespace) -> None:
+    """
+    Full project registration flow: create/re-link project, guide provider
+    setup if none exist, then auto-bind a provider to the project.
+
+    Designed to be called from install scripts via:
+        leafhub register <name> --path <dir> [--alias <alias>] [--headless]
+    """
+    import json
     import subprocess
-    setup_sh = Path(__file__).parent.parent.parent / "setup.sh"
-    if not setup_sh.exists():
-        _die(
-            f"setup.sh not found at {setup_sh}.\n"
-            "  Run manually: rm ~/.local/bin/leafhub  (and remove the leafhub PATH "
-            "block from ~/.bashrc / ~/.zshrc)"
+
+    from .manage.projects import (
+        _distribute_integration_files, _is_integrated, _write_dotfile,
+    )
+
+    name     = args.project_name
+    raw_path = getattr(args, "path", None)
+    path     = Path(_strip_path_quotes(raw_path)).resolve() if raw_path else Path.cwd()
+    alias    = getattr(args, "alias", None) or "default"
+    headless = getattr(args, "headless", False)
+
+    if not path.is_dir():
+        _die(f"Project directory not found: {path}")
+
+    # ── 1. Create or re-link project ─────────────────────────────────────────
+    # Capture hub_dir before entering the try block so it remains accessible
+    # later in the function (Python has no block scoping).
+    store, hub_dir = _open_store()
+    try:
+        existing = store.find_project_by_name(name)
+        if existing is not None:
+            raw_token = store.rotate_token(existing.id)
+            store.set_project_path(existing.id, str(path))
+            project_id = existing.id
+            _write_dotfile(path, name, raw_token)
+            # Already integrated — only refresh .leafhub; leave existing files alone.
+            print(f"✓ Project '{name}' re-linked to {path}.")
+        else:
+            project, raw_token = store.create_project(name)
+            project_id = project.id
+            store.set_project_path(project_id, str(path))
+            _write_dotfile(path, name, raw_token)
+            distributed = _distribute_integration_files(path)
+            if distributed:
+                print(f"  Integration files written: {', '.join(distributed)}.")
+            print(f"✓ Project '{name}' created and linked to {path}.")
+    finally:
+        store.close()
+
+    # ── 2. Check providers ────────────────────────────────────────────────────
+    store, _ = _open_store()
+    providers = store.list_providers()
+    store.close()
+
+    if not providers and not headless and sys.stdin.isatty():
+        print()
+        print(f"  Project '{name}' needs an AI provider.")
+        print("  LeafHub stores API keys encrypted on this machine — nothing leaves your system.")
+        print("  Supported: OpenAI · Anthropic · Groq · Mistral · OpenRouter · xAI · Ollama · vLLM")
+        print()
+        print("  How would you like to configure your provider?")
+        print("    [1] Launch Web UI   — visual setup at http://localhost:8765  (recommended)")
+        print("    [2] Terminal        — step-by-step CLI prompts")
+        print("    [s] Skip            — configure later with: leafhub provider add")
+        print()
+        try:
+            choice = input("  Choice [1]: ").strip() or "1"
+        except EOFError:
+            choice = "s"
+
+        if choice in ("1", ""):
+            leafhub_bin = sys.argv[0]
+            proc = subprocess.Popen(
+                [leafhub_bin, "manage", "--no-browser"],
+                start_new_session=True,
+            )
+            print()
+            print("  Web UI running at http://localhost:8765")
+            print("  Add a provider, then come back here.")
+            try:
+                input("\n  Press Enter when done...")
+            except EOFError:
+                pass
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        elif choice == "2":
+            store_tmp, _ = _open_store()
+            try:
+                _prompt_new_provider(store_tmp, hub_dir)
+            finally:
+                store_tmp.close()
+        else:
+            print(f"  Skipped. Run: leafhub provider add")
+            print(f"  Then bind:   leafhub project bind {name} --alias {alias} --provider <name>")
+            return
+
+        # Re-read providers after setup
+        store, _ = _open_store()
+        providers = store.list_providers()
+        store.close()
+
+    # ── 3. Auto-bind provider ─────────────────────────────────────────────────
+    if not providers:
+        if not headless:
+            print()
+            print(f"  No providers configured. Bind later:")
+            print(f"    leafhub provider add")
+            print(f"    leafhub project bind {name} --alias {alias} --provider <name>")
+        return
+
+    if len(providers) == 1:
+        chosen = providers[0]
+    elif headless:
+        chosen = providers[0]
+    else:
+        print()
+        print(f"  Multiple providers — which should '{name}' use?")
+        for i, p in enumerate(providers, 1):
+            print(f"    [{i}] {p.label}  ({p.api_format})")
+        try:
+            raw = input("  Choice [1]: ").strip() or "1"
+            idx = int(raw) - 1
+            chosen = providers[idx] if 0 <= idx < len(providers) else providers[0]
+        except (EOFError, ValueError, IndexError):
+            chosen = providers[0]
+
+    store, _ = _open_store()
+    try:
+        store.add_binding(
+            project_id=project_id,
+            alias=alias,
+            provider_id=chosen.id,
         )
-    subprocess.run(["bash", str(setup_sh), "--uninstall"], check=True)
+        print(f"✓ Bound '{chosen.label}' → '{name}' (alias: {alias})")
+    except Exception as exc:
+        # Non-fatal: project is linked; user can bind manually.
+        log.warning("Auto-bind failed (%s: %s) — continuing", type(exc).__name__, exc)
+        print(f"  Bind later: leafhub project bind {name} --alias {alias} --provider {chosen.label}")
+    finally:
+        store.close()
+
+
+# ── Shell-helper command ────────────────────────────────────────────────────────
+
+def cmd_shell_helper(args: argparse.Namespace) -> None:
+    """Print register.sh content for eval in install scripts."""
+    import importlib.resources as _pkg_res
+
+    # Primary: package data (works when installed or in editable mode)
+    try:
+        content = _pkg_res.files("leafhub").joinpath("register.sh").read_text(encoding="utf-8")
+        print(content, end="")
+        return
+    except (FileNotFoundError, TypeError, AttributeError):
+        pass
+
+    # Fallback: git checkout layout (Leafhub/register.sh).
+    # This path only works in a development checkout — the relative traversal
+    # (cli.py → leafhub/ → src/ → Leafhub/) is not guaranteed in installed packages.
+    register_sh = Path(__file__).parent.parent.parent / "register.sh"
+    if not register_sh.exists():
+        _die(
+            f"register.sh not found (tried package data and {register_sh}).\n"
+            "  Fetch directly: curl -fsSL "
+            "https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh"
+        )
+    print(register_sh.read_text(), end="")
 
 
 # ── Argument parser ────────────────────────────────────────────────────────────
@@ -785,6 +1262,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # provider list
     p_lst = p_prov_sub.add_parser("list", help="List all providers")
+    p_lst.add_argument("--json", action="store_true",
+                       help="Output as JSON array (for scripting)")
     p_lst.set_defaults(func=cmd_provider_list)
 
     # provider show
@@ -807,9 +1286,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pc.add_argument("project_name", help="Project name")
     p_pc.add_argument("--path",     metavar="DIR",
                       help="Link to a local directory and write .leafhub immediately")
-    p_pc.add_argument("--no-probe", action="store_true",
-                      help="Skip copying leafhub_probe.py to the project root "
-                           "(only applies when --path is given)")
+    p_pc.add_argument("--yes", "-y", action="store_true",
+                      help="Skip interactive bind wizard (for use in scripts)")
+    p_pc.add_argument("--if-not-exists", action="store_true", dest="if_not_exists",
+                      help="Re-link silently if project already exists instead of erroring")
     p_pc.set_defaults(func=cmd_project_create)
 
     # project link
@@ -820,8 +1300,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lnk.add_argument("project_name", help="Project name")
     p_lnk.add_argument("--path", required=True, metavar="DIR",
                        help="Absolute path to the project directory")
-    p_lnk.add_argument("--no-probe", action="store_true",
-                       help="Skip copying leafhub_probe.py to the project root")
     p_lnk.set_defaults(func=cmd_project_link)
 
     # project list
@@ -859,6 +1337,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── status ────────────────────────────────────────────────────────────────
     p_status = sub.add_parser("status", help="Show storage status")
+    p_status.add_argument("--json", action="store_true",
+                          help="Output as JSON (for scripting)")
     p_status.set_defaults(func=cmd_status)
 
     # ── manage ────────────────────────────────────────────────────────────────
@@ -889,14 +1369,65 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_manage.set_defaults(func=cmd_manage)
 
+    # ── register ──────────────────────────────────────────────────────────────
+    p_reg = sub.add_parser(
+        "register",
+        help="Register a project: create/re-link, guide provider setup, auto-bind",
+        description=(
+            "One-shot project registration for use in install scripts.\n\n"
+            "Creates the project if it does not exist, re-links if it does,\n"
+            "guides provider setup when none are configured, then auto-binds\n"
+            "a provider to the project under the given alias."
+        ),
+    )
+    p_reg.add_argument("project_name", help="Project name")
+    p_reg.add_argument("--path", metavar="DIR",
+                       help="Project directory (default: current directory)")
+    p_reg.add_argument("--alias", default="default",
+                       help="Binding alias to create (default: default)")
+    p_reg.add_argument("--headless", action="store_true",
+                       help="Non-interactive mode: skip all prompts, auto-select first provider")
+    p_reg.set_defaults(func=cmd_register)
+
+    # ── shell-helper ──────────────────────────────────────────────────────────
+    p_sh = sub.add_parser(
+        "shell-helper",
+        help="Print register.sh for eval in install scripts",
+        description=(
+            "Outputs the contents of register.sh — the standard shell module\n"
+            "for project bootstrap — so install scripts can source it without curl:\n\n"
+            "    eval \"$(leafhub shell-helper)\""
+        ),
+    )
+    p_sh.set_defaults(func=cmd_shell_helper)
+
+    # ── clean ─────────────────────────────────────────────────────────────────
+    p_clean = sub.add_parser(
+        "clean",
+        help="Remove all providers and projects (requires two confirmations)",
+        description=(
+            "Permanently removes all stored providers and projects.\n\n"
+            "For each linked project: removes .leafhub, leafhub_probe.py, and\n"
+            "register.sh from the project directory, and strips CLI symlinks /\n"
+            "shell PATH entries added by the project's installer.\n\n"
+            "The LeafHub installation itself is NOT removed.\n"
+            "Requires two explicit confirmations."
+        ),
+    )
+    p_clean.set_defaults(func=cmd_clean)
+
     # ── uninstall ──────────────────────────────────────────────────────────────
     p_uninst = sub.add_parser(
         "uninstall",
-        help="Remove the leafhub CLI registration (symlink, PATH, venv)",
+        help="Clean all data, remove LeafHub CLI registration, and delete source files",
         description=(
-            "Reverses what 'python scripts/setup.py' did:\n"
-            "removes the symlink, PATH entries, and the project venv.\n\n"
-            "The ~/.leafhub/ data directory (API keys, DB) is NOT removed."
+            "Full removal of LeafHub from this machine.\n\n"
+            "Step 1 — Clean: removes all providers, projects, project artefacts,\n"
+            "         and project CLI registrations (same as 'leafhub clean').\n"
+            "Step 2 — Self-remove: deletes the leafhub CLI symlink, strips the\n"
+            "         leafhub PATH block from shell RC files, removes ~/.leafhub/\n"
+            "         (encrypted keys + DB), and deletes the install directory.\n\n"
+            "Requires two explicit confirmations."
         ),
     )
     p_uninst.set_defaults(func=cmd_uninstall)
