@@ -1175,7 +1175,7 @@ def cmd_register(args: argparse.Namespace) -> None:
             if registered:
                 print(f"✓ CLI registered: {', '.join(registered)}")
         else:
-            print(f"  Skipped. Register later: leafhub project register-cli <project-id>")
+            print(f"  Skipped. Re-run setup.sh or: leafhub project link {name} --path {path}")
 
     # ── 3. Check providers ────────────────────────────────────────────────────
     store, _ = _open_store()

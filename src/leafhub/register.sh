@@ -92,9 +92,50 @@
 #        [[ "$HEADLESS" == "true" ]] && export LEAFHUB_HEADLESS=1
 #        leafhub_setup_project "my-project" "$SCRIPT_DIR"
 #
+#  LEAFHUB_CALLER=1  (set automatically by LeafHub — do not set manually)
+#      When a project is registered from the LeafHub Web UI or via
+#      `leafhub project link`, LeafHub may run your setup.sh automatically
+#      (with --headless) to install the project and register its CLI.
+#      To prevent infinite recursion (setup.sh → leafhub register →
+#      setup.sh again), LeafHub sets LEAFHUB_CALLER=1 in the subprocess
+#      environment before invoking setup.sh.
+#
+#      Any nested `leafhub register` call inherits this variable and skips
+#      the auto-setup step.  You do not need to read or forward it manually.
+#
+#      If you want to detect that your setup.sh was invoked by LeafHub
+#      rather than by the user directly, you can check:
+#        [[ "${LEAFHUB_CALLER:-0}" == "1" ]] && echo "invoked by LeafHub"
+#
 #  LEAFHUB_DIR=<path>
 #      Custom install directory for LeafHub (forwarded to the LeafHub
 #      installer if it runs from scratch).  Defaults to ~/leafhub.
+#
+#
+#  LEAFHUB-INITIATED REGISTRATION FLOW
+#  ────────────────────────────────────
+#  When a user registers a project from the LeafHub Web UI or via
+#  `leafhub project link`, LeafHub performs these steps automatically:
+#
+#    1. Write .leafhub token file (chmod 600) to project directory.
+#    2. Distribute register.sh and leafhub_probe.py (first link only).
+#    3. If setup.sh is present AND .venv is absent:
+#         → run `bash setup.sh --headless` with LEAFHUB_CALLER=1
+#         → setup.sh installs the project, creates .venv, calls leafhub register
+#    4. Detect executables in .venv/bin/ that are not Python stdlib tools
+#       and not yet in ~/.local/bin/ → create symlinks automatically.
+#
+#  For this to work correctly, your setup.sh must:
+#    a) Support the --headless flag (or LEAFHUB_HEADLESS=1 env var) to run
+#       non-interactively without hanging on prompts.
+#    b) Call `pip install -e .` (or equivalent) before calling
+#       `leafhub_setup_project` so the CLI binary exists in .venv/bin/.
+#    c) Define CLI entry points in pyproject.toml / setup.py so pip creates
+#       the executable in .venv/bin/ automatically.
+#
+#  If setup.sh is absent, LeafHub assumes the project has no CLI to register
+#  and skips step 3-4 entirely.  This is the correct behaviour for libraries
+#  or projects that manage their own PATH separately.
 #
 #
 #  IDEMPOTENCY

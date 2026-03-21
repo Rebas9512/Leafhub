@@ -240,13 +240,22 @@ _VENV_STDLIB_NAMES = frozenset({
 def _detect_project_cli(project_dir: Path) -> list[tuple[str, Path]]:
     """Return ``(name, venv_path)`` for project CLI executables not yet in ``~/.local/bin``.
 
+    **Gating condition**: the project must contain a ``setup.sh``.  Its presence
+    is the standard marker that this project has a CLI install flow managed by
+    LeafHub.  Projects without ``setup.sh`` are treated as having no CLI to
+    register (e.g. libraries or projects that manage their PATH themselves).
+
     Scans ``<project_dir>/.venv/bin/`` for executable files that are not
     standard Python-venv tools, then filters out any that are already
     symlinked (and point into this project) in ``~/.local/bin/``.
 
-    Returns an empty list on non-POSIX platforms or when no venv is present.
+    Returns an empty list on non-POSIX platforms, when ``setup.sh`` is absent,
+    or when no venv is present.
     """
     if os.name != "posix":
+        return []
+    # setup.sh is the standard marker for a LeafHub-managed CLI install flow.
+    if not (project_dir / "setup.sh").exists():
         return []
     venv_bin = project_dir / ".venv" / "bin"
     if not venv_bin.is_dir():
@@ -275,8 +284,61 @@ def _detect_project_cli(project_dir: Path) -> list[tuple[str, Path]]:
     return result
 
 
+def _run_project_setup_if_needed(project_dir: Path) -> bool:
+    """Run ``setup.sh --headless`` when the project has not yet been set up.
+
+    This is called during LeafHub-initiated project registration (link or
+    create with path) so that the project's own installer has a chance to
+    build the virtual environment and install the CLI *before* LeafHub
+    attempts CLI detection.
+
+    Conditions for execution (all must hold):
+    - POSIX platform (``os.name == "posix"``)
+    - ``setup.sh`` exists in *project_dir*
+    - ``.venv/`` does **not** yet exist (project not yet installed)
+    - ``LEAFHUB_CALLER`` is **not** set in the current environment
+      (prevents infinite recursion when setup.sh calls ``leafhub register``,
+      which would otherwise trigger setup.sh again)
+
+    ``LEAFHUB_CALLER=1`` is passed to the subprocess environment so that any
+    nested ``leafhub register`` call skips this step.
+
+    Returns ``True`` if ``setup.sh`` was executed (regardless of exit code),
+    ``False`` if any condition was not met.  Failures are logged as warnings
+    and never raise.
+    """
+    if os.name != "posix":
+        return False
+    if os.environ.get("LEAFHUB_CALLER"):
+        return False  # we are already running inside a LeafHub-triggered setup
+    setup_sh = project_dir / "setup.sh"
+    if not setup_sh.exists():
+        return False
+    if (project_dir / ".venv").exists():
+        return False  # project already installed — skip
+
+    import subprocess as _sp
+
+    env = {**os.environ, "LEAFHUB_CALLER": "1", "LEAFHUB_HEADLESS": "1"}
+    log.info("LeafHub: running %s --headless to install project CLI ...", setup_sh)
+    print(f"  Running setup.sh --headless to install project CLI ...")
+    try:
+        _sp.run(
+            ["bash", str(setup_sh), "--headless"],
+            cwd=project_dir,
+            env=env,
+        )
+    except Exception as exc:
+        log.warning("Could not run setup.sh: %s", exc)
+    return True
+
+
 def _register_cli_symlinks(project_dir: Path) -> list[str]:
     """Create ``~/.local/bin`` symlinks for unregistered project CLI tools.
+
+    If ``setup.sh`` is present but ``.venv`` is absent (project not yet
+    installed), :func:`_run_project_setup_if_needed` is called first so that
+    the CLI binary exists before detection runs.
 
     Calls :func:`_detect_project_cli` and creates one symlink per detected
     tool.  Existing symlinks that point elsewhere are replaced.
@@ -284,6 +346,8 @@ def _register_cli_symlinks(project_dir: Path) -> list[str]:
     Returns the list of CLI names that were successfully registered.
     Non-fatal errors are logged as warnings.
     """
+    _run_project_setup_if_needed(project_dir)
+
     unregistered = _detect_project_cli(project_dir)
     if not unregistered:
         return []
