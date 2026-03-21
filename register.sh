@@ -11,30 +11,50 @@
 #    1. Detect the leafhub binary in PATH; install it automatically if absent.
 #    2. Call `leafhub register` to create or re-link the project (idempotent).
 #    3. Guide API provider setup when no providers are configured yet.
-#    4. Auto-bind a provider to the project under the default alias.
-#    5. Copy leafhub_probe.py into the project directory for runtime detection.
+#    4. Auto-bind a provider to the project under the specified alias.
+#    5. Write leafhub_dist/ into the project directory for runtime detection.
 #
-#  HOW TO USE IN A NEW PROJECT  (3-line integration)
-#  ──────────────────────────────────────────────────
-#  Add these three lines to your project's setup.sh, after the venv step:
+#  HOW TO USE IN A NEW PROJECT  (v2 standard, 2026-03-21)
+#  ───────────────────────────────────────────────────────
+#  Add the following block to your project's setup.sh, after the venv step:
 #
 #    # ── LeafHub integration ───────────────────────────────────────────────────
-#    eval "$(leafhub shell-helper 2>/dev/null)" \
-#        || eval "$(curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh)"
-#    leafhub_setup_project "my-project-name" "$SCRIPT_DIR" \
+#    # Resolution order (v2 standard, 2026-03-21):
+#    #   1. leafhub shell-helper     — system PATH binary (fast path, offline)
+#    #   2. leafhub_dist/register.sh — local distributed copy (offline fallback)
+#    #   3. GitHub curl              — first-time bootstrap, network required
+#    # NOTE: `eval "$(cmd)"` is NOT used — eval "" always exits 0, making the
+#    # fallback unreachable when leafhub is absent from PATH.
+#    _lh_content=""
+#    if _lh_content="$(leafhub shell-helper 2>/dev/null)" && [[ -n "$_lh_content" ]]; then
+#        eval "$_lh_content"
+#    elif [[ -f "$SCRIPT_DIR/leafhub_dist/register.sh" ]]; then
+#        source "$SCRIPT_DIR/leafhub_dist/register.sh"
+#    else
+#        _TMP_REG="$(mktemp)"
+#        if ! curl -fsSL \
+#                https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh \
+#                -o "$_TMP_REG" 2>/dev/null; then
+#            rm -f "$_TMP_REG"
+#            fail "Could not fetch LeafHub installer."
+#        fi
+#        source "$_TMP_REG"
+#        rm -f "$_TMP_REG"
+#    fi
+#    unset _lh_content
+#    leafhub_setup_project "my-project-name" "$SCRIPT_DIR" "my-alias" \
 #        || fail "LeafHub registration failed."
 #
-#  Line 1: Try to get this file's content from the locally-installed leafhub
-#           binary (`leafhub shell-helper` prints register.sh to stdout).
-#           If leafhub is already installed, this works instantly and offline.
-#           '2>/dev/null' silences the error when leafhub is not installed yet.
+#  Optional 4th tier (when leafhub is a pip dependency of your project):
+#  Insert after tier 1:
+#    elif [[ -x "$VENV_DIR/bin/leafhub" ]] \
+#        && _lh_content="$("$VENV_DIR/bin/leafhub" shell-helper 2>/dev/null)" \
+#        && [[ -n "$_lh_content" ]]; then
+#        eval "$_lh_content"
 #
-#  Line 2: Fallback — if leafhub is not yet installed, fetch this file directly
-#           from GitHub and source it.  _leafhub_ensure() inside will then
-#           install leafhub automatically before proceeding.
-#
-#  Line 3: Call the function.  Pass your project's slug name and directory.
-#           Treat a non-zero return as fatal (see FAILURE BEHAVIOUR below).
+#  Last argument to leafhub_setup_project is the alias your runtime code uses
+#  with hub.get_key("<alias>").  See the ARGUMENTS section below.
+#  Treat a non-zero return as fatal (see FAILURE BEHAVIOUR below).
 #
 #  Only two things need changing per project:
 #    - The name argument: lowercase slug matching the repository name.
@@ -62,22 +82,53 @@
 #       default alias.  If multiple providers exist, the user is asked to pick.
 #       Binding records which provider and model to use for this project.
 #
-#    d) Probe copy:
-#       leafhub_probe.py is copied into the project root.  This is a
-#       stdlib-only file that the project imports at runtime to auto-detect
-#       its credentials — no token in source code, no env vars required.
+#    d) Distribute integration module (v2 standard, 2026-03-21):
+#       leafhub_dist/ is written into the project root on first registration.
+#       This directory contains probe.py (stdlib-only runtime detection),
+#       register.sh (this file), and __init__.py (makes it importable as a
+#       Python package).  The project imports probe.py at runtime to
+#       auto-detect credentials — no token in source code, no env vars needed.
+#       Re-registration (token rotation / re-link) refreshes the dotfile only;
+#       the leafhub_dist/ directory is not overwritten.
 #
 #
 #  RUNTIME CREDENTIAL RESOLUTION (what happens in your project at startup)
 #  ─────────────────────────────────────────────────────────────────────────
+#  IMPORTANT — two-tier dependency model:
+#    detect()     is stdlib-only: works without leafhub pip package.
+#    open_sdk()   requires the leafhub pip package (imports leafhub.sdk).
+#
+#  Your project MUST declare leafhub as a pip dependency so that open_sdk()
+#  works at runtime.  Add to pyproject.toml and setup.sh:
+#
+#    # pyproject.toml
+#    [project.optional-dependencies]
+#    leafhub = ["leafhub @ git+https://github.com/Rebas9512/Leafhub.git"]
+#
+#    # setup.sh — after venv creation and main deps install
+#    "$VENV_PIP" install -e "$SCRIPT_DIR[leafhub]" --quiet
+#
 #  After setup, your project's startup code resolves credentials like this:
 #
-#    from leafhub.probe import detect          # or: from leafhub_probe import detect
-#    found = detect()                          # fast, never raises, < 1 s
+#    # Ensure project root is on sys.path so leafhub_dist is importable
+#    # when leafhub pip package is absent (editable installs expose only
+#    # named packages, not the project root directory itself).
+#    import sys
+#    from pathlib import Path
+#    _proj_root = str(Path(__file__).resolve().parent)  # adjust depth as needed
+#    if _proj_root not in sys.path:
+#        sys.path.insert(0, _proj_root)
+#
+#    try:
+#        from leafhub.probe import detect          # pip package (preferred)
+#    except ImportError:
+#        from leafhub_dist.probe import detect     # local distributed fallback
+#
+#    found = detect()                              # fast, never raises, < 1 s
 #    if found.ready:
-#        hub  = found.open_sdk()
-#        key  = hub.get_key("default")         # decrypted API key string
-#        cfg  = hub.get_config("default")      # base_url, model, auth_mode, ...
+#        hub  = found.open_sdk()                   # requires leafhub pip package
+#        key  = hub.get_key("my-alias")            # decrypted API key string
+#        cfg  = hub.get_config("my-alias")         # base_url, model, auth_mode, ...
 #
 #  If found.ready is False (project not linked, token expired, etc.), fall back
 #  to environment variables or show a helpful error.
@@ -112,17 +163,27 @@
 #      installer if it runs from scratch).  Defaults to ~/leafhub.
 #
 #
-#  LEAFHUB-INITIATED REGISTRATION FLOW
+#  LEAFHUB-INITIATED REGISTRATION FLOW  (standard v2, updated 2026-03-21)
 #  ────────────────────────────────────
 #  When a user registers a project from the LeafHub Web UI or via
 #  `leafhub project link`, LeafHub performs these steps automatically:
 #
 #    1. Write .leafhub token file (chmod 600) to project directory.
-#    2. Distribute register.sh and leafhub_probe.py (first link only).
-#    3. If setup.sh is present AND .venv is absent:
+#    2. Distribute leafhub_dist/ integration module (first link only):
+#         leafhub_dist/__init__.py  — Python package entrypoint
+#         leafhub_dist/probe.py     — stdlib-only runtime detection
+#         leafhub_dist/register.sh  — this file (shell integration module)
+#       Re-link / token rotation: only the .leafhub dotfile is updated.
+#    3. Auto-bind the first available provider under the requested alias
+#       (v2 addition — the link endpoint now accepts an `alias` field;
+#        callers must pass the alias they intend to query at runtime, e.g.
+#        "rewrite" for Trileaf).  If no providers are configured the bind
+#        is skipped; add a provider first, then run:
+#          leafhub project bind <name> --alias <alias> --provider <name>
+#    4. If setup.sh is present AND .venv is absent:
 #         → run `bash setup.sh --headless` with LEAFHUB_CALLER=1
 #         → setup.sh installs the project, creates .venv, calls leafhub register
-#    4. Detect executables in .venv/bin/ that are not Python stdlib tools
+#    5. Detect executables in .venv/bin/ that are not Python stdlib tools
 #       and not yet in ~/.local/bin/ → create symlinks automatically.
 #
 #  For this to work correctly, your setup.sh must:

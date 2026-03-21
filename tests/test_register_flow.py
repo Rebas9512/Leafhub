@@ -170,7 +170,7 @@ class TestCmdRegister(unittest.TestCase):
                           path=str(self.proj_dir), alias="default", headless=True)
         with patch("leafhub.manage.projects._write_dotfile") as mock_dotfile, \
              patch("leafhub.manage.projects._distribute_integration_files",
-                   return_value=["register.sh", "leafhub_probe.py"]) as mock_dist:
+                   return_value=["leafhub_dist"]) as mock_dist:
             cmd_register(args)
         mock_dotfile.assert_called_once()
         mock_dist.assert_called_once()
@@ -203,7 +203,7 @@ class TestCmdRegister(unittest.TestCase):
         args = _make_args(project_name="relink-app",
                           path=str(second_dir), alias="default", headless=True)
         with patch("leafhub.manage.projects._write_dotfile"), \
-             patch("leafhub.manage.projects._copy_probe_to_project"):
+             patch("leafhub.manage.projects._write_dist_dir"):
             cmd_register(args)
 
         # Must still be exactly one project with this name (no duplicate)
@@ -281,7 +281,7 @@ class TestCmdRegister(unittest.TestCase):
                           alias="default", headless=False)
         output_lines: list[str] = []
         with patch("leafhub.manage.projects._write_dotfile"), \
-             patch("leafhub.manage.projects._copy_probe_to_project"), \
+             patch("leafhub.manage.projects._write_dist_dir"), \
              patch("sys.stdin.isatty", return_value=False):
             with patch("builtins.print", side_effect=lambda *a, **k: output_lines.append(" ".join(str(x) for x in a))):
                 cmd_register(args)

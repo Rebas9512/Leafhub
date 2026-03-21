@@ -381,7 +381,7 @@ class TestStoreClosed(unittest.TestCase):
              patch.object(cli_mod, "_interactive_bind_wizard",
                           side_effect=KeyboardInterrupt), \
              patch("leafhub.manage.projects._write_dotfile", return_value=None), \
-             patch("leafhub.manage.projects._copy_probe_to_project", return_value=None), \
+             patch("leafhub.manage.projects._write_dist_dir", return_value=None), \
              patch("sys.stdin.isatty", return_value=False):
             with self.assertRaises(KeyboardInterrupt):
                 cli_mod.cmd_project_link(args)
