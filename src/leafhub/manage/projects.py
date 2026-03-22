@@ -119,101 +119,193 @@ def _write_dotfile(project_dir: Path, project_name: str, raw_token: str) -> Path
     return dotfile
 
 
-# ── Integration file distribution ────────────────────────────────────────────
+# ── Integration module distribution ──────────────────────────────────────────
+#
+# Distribution standard v2 (2026-03-21):
+#   A single ``leafhub_dist/`` directory is written to the project root instead
+#   of two loose files (``register.sh`` + ``leafhub_probe.py``).
+#
+#   leafhub_dist/
+#     __init__.py   — re-exports detect/register/ProbeResult; makes the
+#                     directory importable as a Python package so that
+#                     ``from leafhub_dist.probe import detect`` works even
+#                     when the ``leafhub`` pip package is not installed.
+#     probe.py      — stdlib-only LeafHub detection & registration module
+#                     (formerly distributed as the top-level leafhub_probe.py).
+#     register.sh   — shell registration helper providing leafhub_setup_project()
+#                     (formerly distributed as the top-level register.sh).
+#
+#   Shell usage in setup.sh:
+#     eval "$(leafhub shell-helper 2>/dev/null)" \
+#         || source "$SCRIPT_DIR/leafhub_dist/register.sh"
+#
+#   Python usage (runtime detection):
+#     try:
+#         from leafhub.probe import detect       # installed package (preferred)
+#     except ImportError:
+#         from leafhub_dist.probe import detect  # local distributed fallback
+#
+#   NOTE: the directory is intentionally NOT named ``leafhub/`` to avoid
+#   shadowing the installed ``leafhub`` pip package on sys.path, which would
+#   break ``from leafhub.sdk import LeafHub`` inside probe.open_sdk().
 
-_PROBE_COPY_NAME   = "leafhub_probe.py"
-_REGISTER_SH_NAME  = "register.sh"
+_LEAFHUB_DIST_DIR  = "leafhub_dist"
 
 # The canonical probe.py lives inside the leafhub package.
 _PROBE_SOURCE = Path(__file__).resolve().parents[1] / "probe.py"
 
+# __init__.py written into the distributed leafhub_dist/ directory.
+_DIST_INIT_PY = '''\
+"""
+leafhub_dist — LeafHub integration module (distributed copy).
+
+Written by ``leafhub register`` / ``leafhub project link`` on first
+registration.  Provides offline-capable shell integration (register.sh)
+and stdlib-only detection (probe.py) for the project's venv.
+
+IMPORTANT — two-tier dependency model
+──────────────────────────────────────
+probe.detect()   — stdlib only; works without the leafhub pip package.
+found.open_sdk() — requires ``leafhub`` pip package (imports leafhub.sdk).
+
+Projects that call open_sdk() (i.e. every project that actually uses
+credentials at runtime) must declare leafhub as a pip dependency:
+
+    # pyproject.toml
+    [project.optional-dependencies]
+    leafhub = ["leafhub @ git+https://github.com/Rebas9512/Leafhub.git"]
+
+    # setup.sh — after venv creation and main deps install
+    "$VENV_PIP" install -e "$SCRIPT_DIR[leafhub]" --quiet
+
+Import pattern:
+    try:
+        from leafhub.probe import detect       # pip package (preferred)
+    except ImportError:
+        from leafhub_dist.probe import detect  # this distributed copy
+
+    # Ensure project root is on sys.path so leafhub_dist is importable
+    # when leafhub pip package is absent (editable installs only expose
+    # named packages, not the project root):
+    import sys
+    from pathlib import Path
+    _root = str(Path(__file__).resolve().parents[1])
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+
+Do not edit probe.py or register.sh manually — they are managed by
+LeafHub and refreshed on every re-registration via:
+    leafhub register <project>
+"""
+from .probe import detect, register, ProbeResult
+
+__all__ = ["detect", "register", "ProbeResult"]
+'''
+
 
 def _is_integrated(project_dir: Path) -> bool:
-    """Return True if *project_dir* already contains ``register.sh``.
+    """Return True if *project_dir* already contains the ``leafhub_dist/`` module.
 
-    Presence of ``register.sh`` indicates the project has previously been
-    integrated with LeafHub (its ``setup.sh`` sources the file).  In that
-    case we only refresh ``.leafhub`` — the integration files are already
-    in place and may have been customised.
+    Presence of the directory indicates a previous registration has run.
+    The files inside are managed by LeafHub and refreshed on re-registration;
+    the check avoids redistributing them when the project is merely re-linked.
+
+    Legacy: also checks for root-level ``register.sh`` (v1 layout) so that
+    projects registered before the v2 standard are not re-distributed
+    unnecessarily — they will receive the new layout on their next explicit
+    re-registration.
     """
-    return (project_dir / _REGISTER_SH_NAME).exists()
+    return (
+        (project_dir / _LEAFHUB_DIST_DIR).is_dir()
+        or (project_dir / "register.sh").exists()   # v1 layout
+    )
 
 
-def _copy_probe_to_project(project_dir: Path) -> None:
-    """Copy ``leafhub/probe.py`` into *project_dir* as ``leafhub_probe.py``."""
-    dest = project_dir / _PROBE_COPY_NAME
-    try:
-        shutil.copy2(_PROBE_SOURCE, dest)
-    except Exception:
-        pass   # non-fatal
+def _write_dist_dir(project_dir: Path) -> None:
+    """Write the ``leafhub_dist/`` integration module into *project_dir*.
 
-
-def _copy_register_sh_to_project(project_dir: Path) -> None:
-    """Copy ``register.sh`` (from package data) into *project_dir*.
-
-    Tries importlib.resources first (installed package / editable install),
-    then falls back to the repository root (development checkout only).
-    Failures are silently ignored — the dotfile is the critical artefact.
+    Creates the directory, writes ``__init__.py``, copies ``probe.py`` from
+    the leafhub package, and copies ``register.sh`` from package data.
+    All failures are silently ignored — the dotfile is the critical artefact.
     """
     import importlib.resources as _pkg_res
 
-    dest = project_dir / _REGISTER_SH_NAME
+    dist_dir = project_dir / _LEAFHUB_DIST_DIR
+    try:
+        dist_dir.mkdir(exist_ok=True)
+    except Exception:
+        return  # can't create directory — give up silently
+
+    # __init__.py
+    try:
+        (dist_dir / "__init__.py").write_text(_DIST_INIT_PY, encoding="utf-8")
+    except Exception:
+        pass
+
+    # probe.py — copy from the installed leafhub package
+    try:
+        shutil.copy2(_PROBE_SOURCE, dist_dir / "probe.py")
+    except Exception:
+        pass
+
+    # register.sh — read from package data, fallback to repo root
     try:
         content = (
             _pkg_res.files("leafhub")
             .joinpath("register.sh")
             .read_text(encoding="utf-8")
         )
-        dest.write_text(content, encoding="utf-8")
+        (dist_dir / "register.sh").write_text(content, encoding="utf-8")
         return
     except Exception:
         pass
-
     # Fallback: development checkout layout
     # Path: src/leafhub/manage/projects.py → parents[3] = repo root
     src = Path(__file__).resolve().parents[3] / "register.sh"
     try:
-        shutil.copy2(src, dest)
+        shutil.copy2(src, dist_dir / "register.sh")
     except Exception:
         pass
 
 
 def _distribute_integration_files(project_dir: Path) -> list[str]:
-    """Copy ``register.sh`` and ``leafhub_probe.py`` to a new project directory.
+    """Write the ``leafhub_dist/`` integration module to a new project directory.
 
     Called only when ``_is_integrated(project_dir)`` returns False — i.e. this
-    is the first time LeafHub is being set up in this directory.
+    is the first registration for this directory.
 
-    Returns the list of filenames that were written (for use in response bodies
-    and CLI output).
+    Returns ``["leafhub_dist"]`` when the directory was created, else ``[]``.
     """
-    _copy_probe_to_project(project_dir)
-    _copy_register_sh_to_project(project_dir)
-    # Report only files that are actually on disk after the operation.
-    distributed = []
-    for name in (_REGISTER_SH_NAME, _PROBE_COPY_NAME):
-        if (project_dir / name).exists():
-            distributed.append(name)
-    return distributed
+    _write_dist_dir(project_dir)
+    if (project_dir / _LEAFHUB_DIST_DIR).is_dir():
+        return [_LEAFHUB_DIST_DIR]
+    return []
 
 
-# ── Dotfile removal ───────────────────────────────────────────────────────────
+# ── Dotfile / module removal ───────────────────────────────────────────────────
 
-_FILES_TO_REMOVE = (_DOTFILE_NAME, _PROBE_COPY_NAME, _REGISTER_SH_NAME)
+# Files removed on project delete.
+# Includes v1-layout loose files for backward compatibility with projects
+# registered before the leafhub_dist/ standard (v2, 2026-03-21).
+_FILES_TO_REMOVE  = (_DOTFILE_NAME, "leafhub_probe.py", "register.sh")
+_DIRS_TO_REMOVE   = (_LEAFHUB_DIST_DIR,)
 
 
 def _remove_project_files(project_dir: Path) -> list[str]:
     """
-    Remove LeafHub-managed files from *project_dir* when a project is deleted.
+    Remove LeafHub-managed files and directories from *project_dir* on delete.
 
-    Removes:
-    - ``.leafhub``       — project token (the critical one)
-    - ``leafhub_probe.py`` — convenience probe copy
+    Removes (all silently skipped if absent):
+    - ``.leafhub``          — project token (critical)
+    - ``leafhub_dist/``     — integration module directory (v2 layout)
+    - ``leafhub_probe.py``  — v1 probe copy (if present from old registration)
+    - ``register.sh``       — v1 shell helper (if present from old registration)
 
-    Returns a list of filenames that were actually removed.
-    Silently skips files that do not exist and never raises.
+    Returns a list of names that were actually removed.
+    Never raises.
     """
     removed: list[str] = []
+
     for name in _FILES_TO_REMOVE:
         target = project_dir / name
         try:
@@ -223,6 +315,17 @@ def _remove_project_files(project_dir: Path) -> list[str]:
             pass
         except Exception:
             log.warning("Could not remove %s", target)
+
+    for name in _DIRS_TO_REMOVE:
+        target = project_dir / name
+        try:
+            shutil.rmtree(target)
+            removed.append(name)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.warning("Could not remove directory %s", target)
+
     return removed
 
 
@@ -522,7 +625,15 @@ class ProjectUpdateRequest(BaseModel):
 
 
 class LinkRequest(BaseModel):
-    path: str    # absolute path to the project directory
+    path:  str           # absolute path to the project directory
+    # alias — registration standard v2 (2026-03-21):
+    # When provided, the link endpoint auto-binds the first available provider
+    # under this alias, matching the behaviour of `leafhub register --alias`.
+    # Callers (web UI, SDK, register.sh) should always pass the alias they
+    # intend to query at runtime (e.g. "rewrite" for Trileaf).
+    # Omitting alias skips auto-bind; the caller must bind manually afterward
+    # via POST /admin/projects/{id}/bindings or `leafhub project bind`.
+    alias: str | None = None
 
 
 def _store(request: Request):
@@ -728,9 +839,37 @@ async def link_project(request: Request, project_id: str, body: LinkRequest):
         if not _is_integrated(project_dir):
             distributed = _distribute_integration_files(project_dir)
         cli_registered = _register_cli_symlinks(project_dir)
-        return p, str(dotfile), distributed, cli_registered
 
-    project, dotfile_path, distributed, cli_registered = await asyncio.to_thread(_link)
+        # Auto-bind (registration standard v2, 2026-03-21):
+        # When the caller supplies an alias, bind the first available provider
+        # under that alias — same logic as `leafhub register --alias`.
+        # This closes the gap where web-UI / SDK initiated links wrote the
+        # dotfile but left no binding, causing hub.get_key(alias) to return
+        # empty and credentials to fall through to "none".
+        # If no providers are configured yet the bind is skipped silently;
+        # the user must add a provider and then run `leafhub project bind`.
+        bound_alias: str | None = None
+        if body.alias:
+            providers = store.list_providers()
+            if providers:
+                try:
+                    store.add_binding(
+                        project_id=p.id,
+                        alias=body.alias,
+                        provider_id=providers[0].id,
+                    )
+                    bound_alias = body.alias
+                except Exception as _exc:
+                    log.warning(
+                        "Auto-bind failed during link (%s: %s) — "
+                        "bind manually: leafhub project bind %s --alias %s --provider <name>",
+                        type(_exc).__name__, _exc, p.name, body.alias,
+                    )
+
+        p = store.get_project(p.id)
+        return p, str(dotfile), distributed, cli_registered, bound_alias
+
+    project, dotfile_path, distributed, cli_registered, bound_alias = await asyncio.to_thread(_link)
     resp: dict = {
         "linked":  True,
         "path":    str(project_dir),
@@ -741,12 +880,15 @@ async def link_project(request: Request, project_id: str, body: LinkRequest):
         resp["files_distributed"] = distributed
     if cli_registered:
         resp["cli_registered"] = cli_registered
+    if bound_alias:
+        resp["bound_alias"] = bound_alias
     resp["message"] = (
         f"Project '{project.name}' linked to {project_dir}. "
         "The .leafhub file has been written — apps in that directory will "
         "auto-detect LeafHub on next startup."
         + (f" Integration files written: {', '.join(distributed)}." if distributed else "")
         + (f" CLI registered: {', '.join(cli_registered)}." if cli_registered else "")
+        + (f" Provider bound under alias '{bound_alias}'." if bound_alias else "")
     )
     return resp
 

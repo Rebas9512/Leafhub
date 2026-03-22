@@ -238,7 +238,7 @@ def cmd_provider_delete(args: argparse.Namespace) -> None:
 
 def cmd_project_create(args: argparse.Namespace) -> None:
     from .manage.projects import (
-        _detect_project_cli, _distribute_integration_files,
+        _distribute_integration_files,
         _is_integrated, _register_cli_symlinks, _write_dotfile,
     )
 
@@ -301,7 +301,7 @@ def cmd_project_create(args: argparse.Namespace) -> None:
 
 def cmd_project_link(args: argparse.Namespace) -> None:
     from .manage.projects import (
-        _detect_project_cli, _distribute_integration_files,
+        _distribute_integration_files,
         _is_integrated, _register_cli_symlinks, _write_dotfile,
     )
 
@@ -893,7 +893,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
     if linked:
         dirs_word = "directory" if len(linked) == 1 else "directories"
         print(
-            f"  Project artefacts (.leafhub, leafhub_probe.py, register.sh)"
+            f"  Project artefacts (.leafhub, leafhub_dist/)"
             f" from {len(linked)} linked {dirs_word}"
         )
         print("  CLI registrations (symlinks + shell PATH entries) for those projects")
@@ -1260,16 +1260,25 @@ def cmd_register(args: argparse.Namespace) -> None:
 
     store, _ = _open_store()
     try:
-        store.add_binding(
-            project_id=project_id,
-            alias=alias,
-            provider_id=chosen.id,
-        )
-        print(f"✓ Bound '{chosen.label}' → '{name}' (alias: {alias})")
+        # Check if this alias is already bound and skip to avoid duplicate noise.
+        existing_bindings = store.list_bindings(project_id)
+        already_bound = any(b.alias == alias for b in existing_bindings)
+        if already_bound:
+            print(f"✓ Alias '{alias}' already bound — skipping re-bind.")
+        else:
+            store.add_binding(
+                project_id=project_id,
+                alias=alias,
+                provider_id=chosen.id,
+            )
+            print(f"✓ Bound '{chosen.label}' → '{name}' (alias: {alias})")
     except Exception as exc:
-        # Non-fatal: project is linked; user can bind manually.
-        log.warning("Auto-bind failed (%s: %s) — continuing", type(exc).__name__, exc)
-        print(f"  Bind later: leafhub project bind {name} --alias {alias} --provider {chosen.label}")
+        # Print visibly — a silent warning left users with no binding and no explanation.
+        print(
+            f"[!] Auto-bind failed ({type(exc).__name__}: {exc})\n"
+            f"    Fix: leafhub project bind {name} --alias {alias} --provider {chosen.label}",
+            file=sys.stderr,
+        )
     finally:
         store.close()
 
@@ -1277,7 +1286,18 @@ def cmd_register(args: argparse.Namespace) -> None:
 # ── Shell-helper command ────────────────────────────────────────────────────────
 
 def cmd_shell_helper(args: argparse.Namespace) -> None:
-    """Print register.sh content for eval in install scripts."""
+    """Print register.sh content for eval in install scripts.
+
+    Usage in setup.sh (v2 standard, 2026-03-21):
+
+        eval "$(leafhub shell-helper 2>/dev/null)" \\
+            || source "$SCRIPT_DIR/leafhub_dist/register.sh"
+
+    ``leafhub shell-helper`` outputs register.sh to stdout for the calling
+    shell to eval.  The local ``leafhub_dist/register.sh`` (distributed to
+    the project at registration time) is the offline fallback — it is sourced
+    directly when the leafhub binary is absent or not yet installed.
+    """
     import importlib.resources as _pkg_res
 
     # Primary: package data (works when installed or in editable mode)

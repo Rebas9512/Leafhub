@@ -202,8 +202,7 @@ class TestCmdRegister(unittest.TestCase):
         from leafhub.cli import cmd_register
         args = _make_args(project_name="relink-app",
                           path=str(second_dir), alias="default", headless=True)
-        with patch("leafhub.manage.projects._write_dotfile"), \
-             patch("leafhub.manage.projects._copy_probe_to_project"):
+        with patch("leafhub.manage.projects._write_dotfile"):
             cmd_register(args)
 
         # Must still be exactly one project with this name (no duplicate)
@@ -281,7 +280,7 @@ class TestCmdRegister(unittest.TestCase):
                           alias="default", headless=False)
         output_lines: list[str] = []
         with patch("leafhub.manage.projects._write_dotfile"), \
-             patch("leafhub.manage.projects._copy_probe_to_project"), \
+             patch("leafhub.manage.projects._distribute_integration_files", return_value=[]), \
              patch("sys.stdin.isatty", return_value=False):
             with patch("builtins.print", side_effect=lambda *a, **k: output_lines.append(" ".join(str(x) for x in a))):
                 cmd_register(args)

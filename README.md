@@ -24,7 +24,7 @@ Manage UI / CLI                  LeafHub                    Your Project
       │                              │  write .leafhub (chmod 600)│
       │                              │ ──────────────────────────►│
       │                              │  (new project) distribute  │
-      │                              │  register.sh + probe.py    │
+      │                              │  leafhub_dist/ module      │
       │                              │ ──────────────────────────►│
       │                              │                            │
       │                              │     Next startup           │
@@ -208,7 +208,7 @@ Remove-Item -Recurse $env:USERPROFILE\.leafhub   # also delete stored keys (opti
     │               probe.py                        │
     │   LeafHub auto-detection (stdlib only)        │
     │   detect() → ProbeResult                      │
-    │   Distributed as leafhub_probe.py on link     │
+    │   Distributed as leafhub_dist/probe.py        │
     └───────┬──────────────────────────────────────┘
             │
     ┌───────▼──────────────────────────────────────┐
@@ -251,7 +251,7 @@ Remove-Item -Recurse $env:USERPROFILE\.leafhub   # also delete stored keys (opti
 |------|----------------|
 | `cli.py` | argparse CLI. Subcommands: `provider add/list/show/delete`, `project create/link/list/show/token/bind/unbind/delete`, `register`, `shell-helper`, `manage`, `status`. `register` includes a CLI detection step: after linking, it scans `.venv/bin/` for project executables not yet in `~/.local/bin/` and prompts to register them (auto-registers in headless/non-TTY mode). After `project create` and `project link`, an interactive binding wizard prompts the user to bind an existing provider or add a new one inline. Silently skipped in non-TTY environments. `manage` automatically frees the target port if already in use before starting the server. |
 | `sdk.py` | `LeafHub` — runtime client for application code. Resolves the hub directory, verifies the project token, decrypts API keys, builds provider-specific auth headers. `from_directory()` auto-loads from a `.leafhub` dotfile. |
-| `probe.py` | Stdlib-only auto-detection module. `detect()` searches for a `.leafhub` dotfile, probes the manage server port, checks for the CLI binary and SDK. Returns a `ProbeResult` with convenience properties (`ready`, `can_link`, `open_sdk()`). Distributed as `leafhub_probe.py` when a project is linked. |
+| `probe.py` | Stdlib-only auto-detection module. `detect()` searches for a `.leafhub` dotfile, probes the manage server port, checks for the CLI binary and SDK. Returns a `ProbeResult` with convenience properties (`ready`, `can_link`, `open_sdk()`). Distributed as `leafhub_dist/probe.py` when a project is linked for the first time. |
 | `register.sh` | Shell integration module (see **Project Integration Standard** below). Bundled into the Python package so `leafhub shell-helper` can output it without a network call. |
 | `errors.py` | Typed exception hierarchy: `LeafHubError`, `StorageNotFoundError`, `InvalidTokenError`, `AliasNotBoundError`, `DecryptionError`. |
 
@@ -276,7 +276,7 @@ Requires `pip install 'leafhub[manage]'`.
 | `server.py` | FastAPI app factory. Lifespan hooks load the master key and open SQLite. Serves the compiled Vue UI from `ui/dist/`. Exposes `GET /health` and `GET /admin/status`. |
 | `auth.py` | Admin token middleware. Reads `LEAFHUB_ADMIN_TOKEN` from environment; all `/admin/*` routes require a matching Bearer token with constant-time comparison. Per-IP sliding-window rate limiter (5 failures → 5-minute lockout). |
 | `providers.py` | CRUD routes for providers. **Connectivity probe on create**: `POST /admin/providers` makes a GET request to the provider's endpoint before saving. Returns HTTP 422 with a diagnostic message if unreachable. |
-| `projects.py` | CRUD routes for projects. Token lifecycle: create (plaintext shown once), rotate, revoke. `POST /admin/projects/{id}/link` and `POST /admin/projects` (with `path`) rotate/create the token, write a `.leafhub` dotfile (chmod 600), auto-distribute integration files (`register.sh` + `leafhub_probe.py`) to new project directories, and **auto-register project CLI tools**: any executable in `.venv/bin/` that is not a standard Python/pip tool and not yet symlinked in `~/.local/bin/` gets a symlink created automatically. Response includes `"cli_registered": [...]` when symlinks were created. Directories that already contain `register.sh` are treated as already integrated and receive only the updated dotfile. `DELETE /admin/projects/{id}` performs a full clean-up: removes `.leafhub`, `leafhub_probe.py`, and `register.sh` from the linked directory, removes CLI symlinks in `~/.local/bin/` pointing into the project, and strips the project's venv PATH entries from shell RC files (macOS/Linux) or the User PATH registry key (Windows). Returns `{"deleted": true, "files_removed": [...], "registration_removed": [...]}`. |
+| `projects.py` | CRUD routes for projects. Token lifecycle: create (plaintext shown once), rotate, revoke. `POST /admin/projects/{id}/link` and `POST /admin/projects` (with `path`) rotate/create the token, write a `.leafhub` dotfile (chmod 600), auto-distribute the `leafhub_dist/` integration module to new project directories (v2 standard, 2026-03-21), and **auto-register project CLI tools**: any executable in `.venv/bin/` that is not a standard Python/pip tool and not yet symlinked in `~/.local/bin/` gets a symlink created automatically. Response includes `"cli_registered": [...]` when symlinks were created. Directories that already contain `leafhub_dist/` (or root-level `register.sh` for v1 projects) are treated as already integrated — only the dotfile is updated. `DELETE /admin/projects/{id}` performs a full clean-up: removes `.leafhub` and `leafhub_dist/` from the linked directory (also removes legacy v1 files `leafhub_probe.py` and `register.sh` if present), removes CLI symlinks in `~/.local/bin/` pointing into the project, and strips the project's venv PATH entries from shell RC files (macOS/Linux) or the User PATH registry key (Windows). Returns `{"deleted": true, "files_removed": [...], "registration_removed": [...]}`. |
 
 ---
 
@@ -284,36 +284,78 @@ Requires `pip install 'leafhub[manage]'`.
 
 This section documents the standard way to integrate LeafHub into a new project. The goal is minimum user effort: one `setup.sh` step handles everything — install, registration, and provider binding.
 
-### The pattern: `register.sh`
+### The pattern: `leafhub_dist/register.sh`
 
-`register.sh` is a shell module that any project can source during its own install script. It provides the `leafhub_setup_project()` function, which handles the complete registration flow.
+On first registration, LeafHub writes a `leafhub_dist/` directory into the project root. This directory contains the `leafhub_setup_project()` shell function and the Python detection module — everything the project needs to integrate with LeafHub, with no runtime network dependency.
 
-**3-line integration in your project's `setup.sh`:**
+**Checklist for a new project (do once):**
+
+| Step | Where | What |
+|---|---|---|
+| 1. Declare pip dependency | `pyproject.toml` | Add `leafhub` to optional-dependencies (see below) |
+| 2. Install in venv | `setup.sh` | `"$VENV_PIP" install -e "$SCRIPT_DIR[leafhub]" --quiet` |
+| 3. Source registration block | `setup.sh` | 4-tier block below — runs `leafhub register` |
+| 4. Add credential resolution | startup code | `detect()` → `open_sdk()` → `hub.get_key("alias")` |
+
+```toml
+# pyproject.toml — add leafhub as an optional dependency
+[project.optional-dependencies]
+leafhub = ["leafhub @ git+https://github.com/Rebas9512/Leafhub.git"]
+```
+
+**Integration block for your project's `setup.sh` (v2 standard, 2026-03-21):**
 
 ```bash
 # ── LeafHub integration ───────────────────────────────────────────────────────
-eval "$(leafhub shell-helper 2>/dev/null)" \
-    || eval "$(curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh)"
-leafhub_setup_project "my-project-name" "$SCRIPT_DIR" \
+# Resolution order — stops at the first successful source:
+#   1. leafhub shell-helper        — system PATH binary (fast path, offline)
+#   2. $VENV_DIR/bin/leafhub       — pip-installed in venv (optional; omit if
+#                                    leafhub is not a pip dep of your project)
+#   3. leafhub_dist/register.sh    — local distributed copy (offline fallback)
+#   4. GitHub curl                 — first-time bootstrap, network required
+#
+# NOTE: `eval "$(cmd)"` is NOT used — eval "" always exits 0, making the
+# fallback unreachable when the binary is absent from PATH.
+_lh_content=""
+if _lh_content="$(leafhub shell-helper 2>/dev/null)" && [[ -n "$_lh_content" ]]; then
+    eval "$_lh_content"
+elif [[ -f "$SCRIPT_DIR/leafhub_dist/register.sh" ]]; then
+    source "$SCRIPT_DIR/leafhub_dist/register.sh"
+else
+    _TMP_REG="$(mktemp)"
+    if ! curl -fsSL \
+            https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh \
+            -o "$_TMP_REG" 2>/dev/null; then
+        rm -f "$_TMP_REG"
+        fail "Could not fetch LeafHub installer."
+    fi
+    source "$_TMP_REG"
+    rm -f "$_TMP_REG"
+fi
+unset _lh_content
+leafhub_setup_project "my-project-name" "$SCRIPT_DIR" "my-alias" \
     || fail "LeafHub registration failed."
 ```
 
 **How the sourcing works:**
 
-| Scenario | What happens |
+| Scenario | Resolution path |
 |---|---|
-| LeafHub already installed | `leafhub shell-helper` outputs `register.sh` content inline — no network call |
-| LeafHub not installed yet | `leafhub shell-helper` fails silently; `curl` fetches `register.sh` from GitHub |
-| No internet connection | Both fail → `leafhub_setup_project` is undefined → your `fail` trap fires |
+| LeafHub installed in system PATH | Tier 1: `leafhub shell-helper` outputs `register.sh` content — no network call |
+| leafhub pip-installed in venv only | Tier 2 (optional): `$VENV_DIR/bin/leafhub shell-helper` — no network call |
+| Already registered (leafhub not in PATH) | Tier 3: `leafhub_dist/register.sh` sourced directly — no network call |
+| Clean install, no LeafHub anywhere | Tier 4: `curl` fetches `register.sh` from GitHub; `_leafhub_ensure()` installs LeafHub |
+| No internet, no LeafHub at all | All tiers fail → `leafhub_setup_project` is undefined → your `fail` trap fires |
 
-**First link vs re-link — file distribution:**
+**First link vs re-link — file distribution (v2 standard, 2026-03-21):**
 
 | Situation | Files written |
 |---|---|
-| First time linking a directory (no `register.sh` present) | `.leafhub` + `register.sh` + `leafhub_probe.py` |
-| Re-linking / token rotation (`register.sh` already exists) | `.leafhub` only — existing files are not overwritten |
+| First time linking a directory (no `leafhub_dist/` present) | `.leafhub` + `leafhub_dist/__init__.py` + `leafhub_dist/probe.py` + `leafhub_dist/register.sh` |
+| Re-linking / token rotation (`leafhub_dist/` already exists) | `.leafhub` only — the `leafhub_dist/` directory is not overwritten |
+| v1 project (root-level `register.sh` present, no `leafhub_dist/`) | `.leafhub` only — treated as already integrated; v2 layout on next explicit re-registration |
 
-The presence of `register.sh` in the project directory is the integration marker. Once a project has been set up, re-running `leafhub register` or rotating the token only refreshes the dotfile.
+The presence of `leafhub_dist/` in the project directory is the v2 integration marker. Once a project has been set up, re-running `leafhub register` or rotating the token only refreshes the dotfile.
 
 **What `leafhub_setup_project "my-project" "$SCRIPT_DIR"` does:**
 
@@ -339,42 +381,162 @@ The presence of `register.sh` in the project directory is the integration marker
    │      Headless: prints reminder and continues without binding
    │
    ├─ d) Auto-bind provider
-   │      1 provider  → bound automatically under alias 'default'
-   │      N providers → user picks one interactively
-   │      Already bound → skipped
+   │      1 provider  → bound automatically under the requested alias
+   │      N providers → user picks one interactively; headless picks first
+   │                    (first = smallest UUID, not most recently added)
+   │      Already bound → skipped (INSERT OR REPLACE is safe if re-run)
+   │      ⚠ Failure is printed to stderr but non-fatal — project remains
+   │        linked; verify with `leafhub project show <name>` afterwards
    │
-   └─ e) Distribute integration files (new projects only)
-          If register.sh is NOT already present in $SCRIPT_DIR:
-            → copy register.sh  (shell integration module)
-            → copy leafhub_probe.py  (stdlib-only runtime detection)
-          If register.sh IS present → already integrated, skip (dotfile only)
+   └─ e) Distribute leafhub_dist/ (new projects only, v2 standard 2026-03-21)
+          If leafhub_dist/ is NOT already present in $SCRIPT_DIR:
+            → write leafhub_dist/__init__.py  (Python package entrypoint)
+            → write leafhub_dist/probe.py     (stdlib-only runtime detection)
+            → write leafhub_dist/register.sh  (shell integration module)
+          If leafhub_dist/ IS present → already integrated, skip (dotfile only)
+          Legacy: root-level register.sh (v1) also counts as already integrated
 ```
 
-**Two things to change per project:**
+**Three things to change per project:**
 
 | What | Convention | Example |
 |---|---|---|
 | Project name | Lowercase slug matching repo name | `"trileaf"`, `"my-toolkit"` |
 | Path | Directory containing `setup.sh` | `"$SCRIPT_DIR"` |
+| Alias | Binding alias your runtime code uses in `hub.get_key("<alias>")` | `"rewrite"`, `"chat"`, `"default"` |
+
+### Alias consistency — the binding contract
+
+The alias is the runtime contract between your `setup.sh` and your application code. **A mismatch is the most common cause of `credentials: none` after a successful registration.**
+
+```
+setup.sh                              runtime code
+─────────────────────────────────     ──────────────────────────────
+leafhub_setup_project "my-app"        hub.get_key("rewrite")   ← must match
+  "$SCRIPT_DIR" "rewrite"
+```
+
+**Rules:**
+
+1. **The alias in `leafhub_setup_project` (or `--alias` flag) must exactly match the alias in `hub.get_key()`.** If you omit `--alias`, the binding is created as `"default"`. If your runtime code calls `hub.get_key("rewrite")` but the binding is `"default"`, you get `AliasNotBoundError` — silently caught as `credentials: none`.
+
+2. **`leafhub register` without `--alias` always creates a `"default"` binding**, regardless of what alias you intend to use at runtime. Always pass `--alias` explicitly.
+
+3. **Binding is per-project, per-alias.** A project can have multiple aliases (e.g. `"chat"` and `"embed"`), each bound to a different provider. Register each alias separately.
+
+4. **`store.list_providers()` returns providers in UUID lexicographic order, not insertion order.** In headless mode with multiple providers, the first provider selected is whichever has the smallest UUID — not the most recently added. Verify binding with `leafhub project show <name>` after registration.
+
+**Verifying the binding was created correctly:**
+
+```bash
+leafhub project show my-project
+# Output should include:
+#   Bindings:
+#     rewrite  → ProviderName  (model: ...)
+```
+
+If the binding is missing or has the wrong alias:
+
+```bash
+leafhub project bind my-project --alias rewrite --provider "ProviderName"
+```
+
+**Robustness pattern for `setup`-style commands:**
+
+Projects should verify the binding after `leafhub register` and attempt to repair it automatically. Call this after model downloads or any setup step that ends before user interaction — do not rely solely on `leafhub register`'s auto-bind succeeding silently.
+
+The pattern used in `trileaf setup` is **token-first**: the project name is always read from `.leafhub`, never hardcoded. This handles two failure modes that a hardcoded name cannot:
+
+- **Project renamed** — LeafHub project name differs from what the code expects (e.g. registered as `"trile"` instead of `"trileaf"`). The dotfile always contains the actual name used at registration time.
+- **Stale token** — `.leafhub` exists but the project was deleted from the vault. `leafhub project show <name>` returns "not found"; the right action is re-register, not bind.
+
+```python
+import json, shutil, subprocess, sys
+from pathlib import Path
+
+_DOTFILE   = Path(__file__).resolve().parent / ".leafhub"   # adjust as needed
+_ALIAS     = "rewrite"     # must match hub.get_key("<alias>") in runtime code
+_ROOT      = _DOTFILE.parent
+
+def _ensure_binding() -> bool:
+    """Verify alias is bound; auto-repair if missing. Token-first: reads project
+    name from .leafhub — works even after renaming or re-registering the project."""
+    if not _DOTFILE.exists():
+        return False
+    leafhub = shutil.which("leafhub")
+    if not leafhub:
+        return False
+
+    # Read actual project name — never hardcode
+    try:
+        project = json.loads(_DOTFILE.read_text())["project"]
+    except Exception:
+        project = _DOTFILE.parent.name   # last-resort fallback: directory name
+
+    # Check project health first — catch stale tokens before attempting bind
+    show = subprocess.run([leafhub, "project", "show", project],
+                          capture_output=True, text=True)
+    if show.returncode != 0 or "not found" in show.stdout.lower():
+        print(f"[!] Project '{project}' not found in vault — re-register:",
+              file=sys.stderr)
+        print(f"      leafhub register {project} --path {_ROOT} --alias {_ALIAS}",
+              file=sys.stderr)
+        return False
+
+    if _ALIAS in show.stdout:
+        return True   # binding already present
+
+    # Binding missing — find first provider and bind
+    prov_out = subprocess.run([leafhub, "provider", "list"],
+                              capture_output=True, text=True).stdout
+    provider = next(
+        (line.strip().split()[0] for line in prov_out.splitlines()
+         if line.strip() and not line.strip().startswith(("─", "Label"))),
+        None,
+    )
+    if not provider:
+        print(f"[!] No providers — add one: leafhub manage", file=sys.stderr)
+        return False
+
+    result = subprocess.run(
+        [leafhub, "project", "bind", project,
+         "--alias", _ALIAS, "--provider", provider],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+```
 
 ### Runtime credential resolution
 
-After setup, the project resolves credentials at startup using the probe:
+After setup, the project resolves credentials at startup using the probe. Two requirements:
+
+1. **`leafhub` pip package installed** — `open_sdk()` needs it; declare it in `pyproject.toml` and install it in `setup.sh` (see integration block above).
+2. **Project root on `sys.path`** — editable installs only expose named packages; add the root explicitly before the fallback import.
 
 ```python
-from leafhub.probe import detect        # installed package
-# — OR —
-from leafhub_probe import detect        # standalone copy in project root (no deps)
+import sys
+from pathlib import Path
 
-found = detect()                        # fast, never raises, < 1 s
+# Editable installs only expose named packages — add project root so
+# leafhub_dist is importable when the leafhub pip package is absent.
+_root = str(Path(__file__).resolve().parent)  # adjust .parent depth as needed
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
+try:
+    from leafhub.probe import detect        # pip package (preferred)
+except ImportError:
+    from leafhub_dist.probe import detect   # local distributed fallback
+
+found = detect()                            # fast, never raises, < 1 s
 
 if found.ready:
-    hub     = found.open_sdk()
-    api_key = hub.get_key("default")    # decrypted key string from vault
-    cfg     = hub.get_config("default") # base_url, model, auth_mode, ...
+    hub     = found.open_sdk()              # requires leafhub pip package
+    api_key = hub.get_key("my-alias")       # decrypted key string from vault
+    cfg     = hub.get_config("my-alias")    # base_url, model, auth_mode, ...
     # provider-specific SDK clients:
-    client  = hub.openai("default")     # openai.OpenAI(api_key=..., base_url=...)
-    client  = hub.anthropic("default")  # anthropic.Anthropic(api_key=...)
+    client  = hub.openai("my-alias")        # openai.OpenAI(api_key=..., base_url=...)
+    client  = hub.anthropic("my-alias")     # anthropic.Anthropic(api_key=...)
 else:
     # Not linked — fall back to env vars or show setup instructions
     api_key = os.environ.get("MY_API_KEY")
@@ -429,38 +591,73 @@ The central workflow that removes token management from application code.
 1. **Create a project** in the Manage UI or CLI — you receive a one-time token.
 2. **Link a directory** — LeafHub writes:
    - `.leafhub` — a JSON file with the project token (chmod 600, auto-added to `.gitignore`)
-   - `register.sh` + `leafhub_probe.py` — integration files distributed automatically on first link (skipped if `register.sh` already exists, indicating the project is already integrated)
+   - `leafhub_dist/` — integration module distributed automatically on first link (v2 standard, 2026-03-21): contains `__init__.py`, `probe.py`, and `register.sh`. Skipped on re-link if `leafhub_dist/` (or legacy `register.sh`) already exists.
 3. **Bind providers** — LeafHub prompts you to bind an existing provider (or add a new one) immediately after create/link. You can add multiple aliases in one session.
 4. **On next startup** — call `detect()` or `LeafHub.from_directory()`. Both walk up the directory tree looking for `.leafhub`, just like git looks for `.git`.
 5. **Delete a project** — when deleted via the CLI or Web UI, LeafHub performs a full clean-up:
-   - Removes `.leafhub` and `leafhub_probe.py` from the linked directory (no stale tokens)
+   - Removes `.leafhub` and `leafhub_dist/` from the linked directory; also removes legacy v1 files (`leafhub_probe.py`, `register.sh`) if present
    - Removes CLI symlinks in `~/.local/bin/` whose resolved target lives inside the project (macOS/Linux)
    - Strips the project's `.venv/bin` PATH entries from `~/.zshrc`, `~/.bashrc`, etc. (macOS/Linux) or from the User PATH registry key (Windows)
    - The CLI and Web UI both report exactly what was removed so you can verify the machine is clean.
 
-### `leafhub_probe.py` — the distributed detection file
+### `leafhub_dist/` — the distributed integration module
 
-When you link a project, LeafHub copies its `probe.py` into your project root as `leafhub_probe.py`. This file:
+On first registration, LeafHub writes a `leafhub_dist/` directory into the project root. This directory is the v2 integration module (standard 2026-03-21):
 
-- Has **zero runtime dependencies** (stdlib only)
-- Can be imported without installing `leafhub`
-- Serves as **inline documentation** — read it to understand the detection protocol and adapt it to your pipeline
+| File | Purpose |
+|---|---|
+| `leafhub_dist/__init__.py` | Makes the directory importable as a Python package; re-exports `detect`, `register`, `ProbeResult` |
+| `leafhub_dist/probe.py` | Stdlib-only auto-detection module — the runtime credential resolver |
+| `leafhub_dist/register.sh` | Shell integration module — `leafhub_setup_project()` for use in `setup.sh` |
+
+The directory is:
+- **`detect()` is stdlib-only** — finds the `.leafhub` file without any pip package; safe to call even if `leafhub` is not installed
+- **`open_sdk()` requires `leafhub` pip** — internally imports `leafhub.sdk`; your project must declare `leafhub` as a pip dependency (see below)
+- **Offline-capable** — `setup.sh` can source `leafhub_dist/register.sh` without a network call after the first registration
+- **Named `leafhub_dist/`** (not `leafhub/`) — avoids shadowing the installed `leafhub` pip package on `sys.path`
+- **Never overwritten on re-registration** — re-link or token rotation only updates `.leafhub`
+
+Do not edit the files inside `leafhub_dist/` manually — they are managed by LeafHub and can be refreshed via `leafhub register <project>`.
+
+**pip dependency requirement**
+
+Every project that calls `open_sdk()` at runtime must declare `leafhub` as a pip dependency. Add to your project's `pyproject.toml` and `setup.sh`:
+
+```toml
+# pyproject.toml
+[project.optional-dependencies]
+leafhub = ["leafhub @ git+https://github.com/Rebas9512/Leafhub.git"]
+```
+
+```bash
+# setup.sh — after venv creation and main deps install
+"$VENV_PIP" install -e "$SCRIPT_DIR[leafhub]" --quiet
+```
+
+**`sys.path` note for editable installs**
+
+Python editable installs (e.g. `pip install -e .`) only expose named packages declared in `pyproject.toml` — they do not add the project root to `sys.path`. Since `leafhub_dist/` lives at the project root, the fallback import `from leafhub_dist.probe import detect` will fail unless the root is on `sys.path`. Add it explicitly before the import:
 
 ```python
-# Option A: installed package
-from leafhub.probe import detect
+import sys
+from pathlib import Path
+_root = str(Path(__file__).resolve().parent)  # adjust .parent depth as needed
+if _root not in sys.path:
+    sys.path.insert(0, _root)
 
-# Option B: standalone copy in project root (zero deps)
-from leafhub_probe import detect
+try:
+    from leafhub.probe import detect        # pip package (preferred)
+except ImportError:
+    from leafhub_dist.probe import detect   # local distributed fallback
 
 found = detect()          # searches from cwd by default
 
 if found.ready:
     # .leafhub found with valid token — open SDK directly
-    hub = found.open_sdk()
-    key = hub.get_key("chat")              # raw API key string
-    client = hub.openai("chat")            # openai.OpenAI instance
-    client = hub.anthropic("chat")         # anthropic.Anthropic instance
+    hub = found.open_sdk()                  # requires leafhub pip package
+    key = hub.get_key("my-alias")          # raw API key string
+    client = hub.openai("my-alias")        # openai.OpenAI instance
+    client = hub.anthropic("my-alias")     # anthropic.Anthropic instance
 
 elif found.server_running:
     print(f"Open {found.manage_url} and link this directory.")
@@ -506,7 +703,10 @@ else:
 
 **Pattern 2 — With setup guidance:**
 ```python
-from leafhub_probe import detect
+try:
+    from leafhub.probe import detect
+except ImportError:
+    from leafhub_dist.probe import detect   # local distributed fallback
 
 found = detect()
 if found.ready:
@@ -665,7 +865,7 @@ Choice: 1
 
 ### `leafhub clean` — wipe all data
 
-Removes all stored providers and projects. For each linked project directory, also removes the project artefacts (`.leafhub`, `leafhub_probe.py`, `register.sh`) and any CLI registrations (symlinks in `~/.local/bin/`, shell PATH entries) that the project's installer created.
+Removes all stored providers and projects. For each linked project directory, also removes the project artefacts (`.leafhub`, `leafhub_dist/`, and legacy v1 files `leafhub_probe.py`/`register.sh` if present) and any CLI registrations (symlinks in `~/.local/bin/`, shell PATH entries) that the project's installer created.
 
 The LeafHub installation itself is **not** removed — only the vault contents are cleared.
 
@@ -677,7 +877,7 @@ $ leafhub clean
 This will permanently remove:
   3 provider(s) : OpenAI, Anthropic, Ollama
   2 project(s)  : my-app, my-toolkit
-  Project artefacts (.leafhub, leafhub_probe.py, register.sh) from 2 linked directories
+  Project artefacts (.leafhub, leafhub_dist/) from 2 linked directories
   CLI registrations (symlinks + shell PATH entries) for those projects
 
 Remove all providers and projects? [y/N] y
@@ -777,16 +977,19 @@ GET    /admin/projects
 POST   /admin/projects            body: {name, bindings?, path?}
 GET    /admin/projects/{id}
 PUT    /admin/projects/{id}
-DELETE /admin/projects/{id}      → full clean-up: removes .leafhub + leafhub_probe.py,
+DELETE /admin/projects/{id}      → full clean-up: removes .leafhub + leafhub_dist/,
                                    CLI symlinks in ~/.local/bin/, and venv PATH entries
-                                   from shell RC files (or Windows User PATH registry)
-                                   Response: {deleted, files_removed, registration_removed}
+                                   from shell RC files (or Windows User PATH registry).
+                                   Also removes legacy v1 files (leafhub_probe.py, register.sh)
+                                   if present. Response: {deleted, files_removed, registration_removed}
 POST   /admin/projects/{id}/rotate-token
 POST   /admin/projects/{id}/deactivate
 POST   /admin/projects/{id}/activate
-POST   /admin/projects/{id}/link  body: {path}
-                                  → rotates token, writes .leafhub; distributes register.sh
-                                    + leafhub_probe.py if project is not already integrated
+POST   /admin/projects/{id}/link  body: {path, alias?}
+                                  → rotates token, writes .leafhub; distributes leafhub_dist/
+                                    if project is not already integrated (first link only).
+                                    alias field (v2): if provided, auto-binds first provider
+                                    under that alias immediately after linking.
 
 # System
 GET    /health
@@ -798,11 +1001,11 @@ GET    /admin/docs                (Swagger UI)
 
 ## Design Philosophy
 
-**Zero-config auto-detection.** When a directory is linked, LeafHub writes a `.leafhub` dotfile and, for new projects, distributes `register.sh` and `leafhub_probe.py`. Projects detect their own credentials on startup without any token in the codebase. Detection walks up the directory tree like git.
+**Zero-config auto-detection.** When a directory is linked, LeafHub writes a `.leafhub` dotfile and, for new projects, distributes a `leafhub_dist/` integration module. Projects detect their own credentials on startup without any token in the codebase. Detection walks up the directory tree like git.
 
-**Standardized integration via `register.sh`.** Any project can embed the 3-line LeafHub integration pattern in its `setup.sh`. The `leafhub shell-helper` command outputs `register.sh` content for inline sourcing — no extra file to maintain, no curl in the common case.
+**Standardized integration via `leafhub_dist/`.** On first registration, LeafHub writes a `leafhub_dist/` directory into the project root containing `probe.py` (detection module), `register.sh` (shell integration), and `__init__.py` (Python package entrypoint). `probe.detect()` is stdlib-only — no pip needed; `found.open_sdk()` requires the `leafhub` pip package, declared as an optional dependency in the project's `pyproject.toml` and installed by `setup.sh`. Any project's `setup.sh` sources `leafhub_dist/register.sh` as an offline fallback — no curl in the common case after the first registration. Named `leafhub_dist/` (not `leafhub/`) to avoid shadowing the installed pip package on `sys.path`.
 
-**Integration files distributed, not fetched.** On first link, LeafHub distributes `register.sh` (the shell integration module) and `leafhub_probe.py` (stdlib-only runtime detection) to the project root. If `register.sh` already exists in the target directory the project is treated as already integrated — only the dotfile is written, so user-customised files are never overwritten. On subsequent links (token rotation or re-link), only `.leafhub` is refreshed.
+**Integration module distributed, not fetched.** On first link, LeafHub writes `leafhub_dist/` to the project root. If `leafhub_dist/` (or the legacy v1 root-level `register.sh`) already exists, the project is treated as already integrated — only the `.leafhub` dotfile is updated, so no user-customised files are overwritten. On subsequent links (token rotation or re-link), only `.leafhub` is refreshed.
 
 **Keys never at rest in plaintext.** Provider API keys are AES-256-GCM encrypted on disk (`providers.enc`). The master key is stored in the system keychain when available; otherwise in a restricted file (chmod 600). The raw key is never logged or returned after creation.
 
@@ -812,7 +1015,7 @@ GET    /admin/docs                (Swagger UI)
 
 **Same name, independent identity.** Multiple projects can share a name. Each project is identified by its token hash, not its name. This enables multi-agent and multi-environment patterns without inventing artificial naming schemes.
 
-**Clean deletion at every level.** When a project is deleted (CLI or Web UI), LeafHub removes all its artefacts: dotfile, probe copy, `register.sh`, CLI symlinks in `~/.local/bin/`, and venv PATH entries from shell RC files or the Windows User PATH registry. `leafhub clean` extends this to all projects at once, wiping the vault contents while leaving the installation in place. `leafhub uninstall` goes further: after cleaning all data it removes its own CLI symlink, PATH entries, data directory, and source tree — leaving the machine in a fully clean state. Both `clean` and `uninstall` require two explicit confirmations and print every item removed.
+**Clean deletion at every level.** When a project is deleted (CLI or Web UI), LeafHub removes all its artefacts: `.leafhub`, `leafhub_dist/` (and legacy v1 files if present), CLI symlinks in `~/.local/bin/`, and venv PATH entries from shell RC files or the Windows User PATH registry. `leafhub clean` extends this to all projects at once, wiping the vault contents while leaving the installation in place. `leafhub uninstall` goes further: after cleaning all data it removes its own CLI symlink, PATH entries, data directory, and source tree — leaving the machine in a fully clean state. Both `clean` and `uninstall` require two explicit confirmations and print every item removed.
 
 **Loopback-only management server.** `leafhub manage` binds to `127.0.0.1` only. Not designed to be network-exposed; the loopback bind is the primary security boundary in dev mode.
 
@@ -827,7 +1030,7 @@ GET    /admin/docs                (Swagger UI)
 - **Multiple projects, one credential store** — each project gets its own token and alias namespace without duplicating provider keys.
 - **Key rotation without code changes** — update the key in LeafHub; all projects reading that provider see the new key immediately.
 - **Single project, multiple agents** — create multiple same-name projects, each with an independent token scope.
-- **Standardized new-project setup** — any future project copies the 3-line integration pattern into its `setup.sh` and gets full credential management for free.
+- **Standardized new-project setup** — any future project sources the `leafhub_dist/register.sh` integration block in its `setup.sh` and gets full credential management for free.
 - **Local Ollama + cloud fallback** — register both; switch bindings in the Web UI without touching application code.
 
 ---
@@ -849,7 +1052,7 @@ Leafhub/
 │       ├── __init__.py
 │       ├── cli.py               # argparse CLI (provider / project / register / shell-helper / manage)
 │       ├── sdk.py               # LeafHub — runtime key access, from_directory()
-│       ├── probe.py             # Auto-detection (stdlib only); distributed as leafhub_probe.py
+│       ├── probe.py             # Auto-detection (stdlib only); distributed as leafhub_dist/probe.py
 │       ├── register.sh          # Bundled copy of register.sh for `leafhub shell-helper`
 │       ├── errors.py            # Typed exception hierarchy
 │       │
@@ -862,7 +1065,7 @@ Leafhub/
 │           ├── server.py        # FastAPI app factory, lifespan, SPA static serving
 │           ├── auth.py          # LEAFHUB_ADMIN_TOKEN gate, per-IP rate limiter
 │           ├── providers.py     # Provider CRUD + connectivity probe on create
-│           └── projects.py      # Project CRUD, link endpoint, .leafhub + smart file distribution
+│           └── projects.py      # Project CRUD, link endpoint, .leafhub + leafhub_dist/ distribution
 │
 ├── ui/                          # Vue 3 + Vite web management interface
 │   ├── src/
