@@ -168,27 +168,26 @@ cd ui && npm install && npm run build && cd ..
 
 ### Uninstall
 
-**macOS / Linux / WSL:**
+#### Full removal (recommended)
 
 ```bash
-rm ~/.local/bin/leafhub
-rm -rf ~/leafhub/               # remove install dir
-rm -rf ~/.leafhub/              # also delete stored keys and DB (optional)
+leafhub uninstall
 ```
 
-**Windows:**
+Performs a complete, interactive two-step removal:
 
-```powershell
-# Remove install dir and PATH entry — replace path if you chose a custom dir
-$scripts = "$env:USERPROFILE\leafhub\.venv\Scripts"
-[Environment]::SetEnvironmentVariable("Path",
-  ([Environment]::GetEnvironmentVariable("Path","User") -split ";" |
-   Where-Object { $_ -ne $scripts }) -join ";", "User")
-Remove-Item -Recurse "$env:USERPROFILE\leafhub"
-Remove-Item -Recurse $env:USERPROFILE\.leafhub   # also delete stored keys (optional)
+1. **Clean all data** — removes every provider, project, project artefact (`.leafhub`, `leafhub_dist/`), CLI symlink registered by each project, and venv PATH entries added by project installers
+2. **Remove LeafHub itself** — removes the `leafhub` CLI symlink and PATH block from shell RC files (POSIX) or the User PATH registry key (Windows), deletes `~/.leafhub/` (encrypted keys + DB), and deletes the install directory
+
+Requires two explicit `[y/N]` confirmations. See [§ `leafhub uninstall`](#leafhub-uninstall--full-removal) for the full output example.
+
+#### Lighter removal (keeps your data)
+
+```bash
+./setup.sh --uninstall
 ```
 
-`~/.leafhub/` (your encrypted keys and project tokens) is **not** removed unless you delete it manually.
+Removes only the CLI registration for this install: the `~/.local/bin/leafhub` symlink, the `# >>> leafhub PATH >>>` block from shell RC files, and the `.venv` directory. `~/.leafhub/` (your encrypted keys and project tokens) is **not** touched — run `leafhub uninstall` if you want to wipe everything.
 
 ---
 
@@ -889,10 +888,10 @@ This cannot be undone. Confirm again [y/N] y
 
 ### `leafhub uninstall` — full removal
 
-Runs `clean` (no re-prompting) then removes LeafHub itself:
+Performs a two-confirmation interactive flow: first cleans all providers, projects, and their artefacts (same as `leafhub clean`, no re-prompting), then removes LeafHub itself:
 
-1. Removes the `~/.local/bin/leafhub` CLI symlink (POSIX) or the User PATH entry (Windows)
-2. Strips the `# >>> leafhub PATH >>>` block from all shell RC files
+1. Removes the `~/.local/bin/leafhub` CLI symlink (POSIX) or the `leafhub .venv\Scripts` entry from the User PATH registry key (Windows)
+2. Strips the `# >>> leafhub PATH >>>` block from shell RC files (POSIX: `.zshrc`, `.bashrc`, etc.)
 3. Removes `~/.leafhub/` (encrypted keys + DB)
 4. Removes the LeafHub install directory
 
