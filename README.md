@@ -37,6 +37,18 @@ Manage UI / CLI                  LeafHub                    Your Project
 
 ---
 
+## Use Cases
+
+- **Stop putting API keys in `.env` files** — store once in the vault, reference by alias in code.
+- **Zero-touch onboarding** — link a directory once from the UI; the project auto-detects credentials on every subsequent startup without any manual step.
+- **Multiple projects, one credential store** — each project gets its own token and alias namespace without duplicating provider keys.
+- **Key rotation without code changes** — update the key in LeafHub; all projects reading that provider see the new key immediately.
+- **Single project, multiple agents** — create multiple same-name projects, each with an independent token scope.
+- **Standardized new-project setup** — any future project sources the `leafhub_dist/register.sh` integration block in its `setup.sh` and gets full credential management for free.
+- **Local Ollama + cloud fallback** — register both; switch bindings in the Web UI without touching application code.
+
+---
+
 ## Getting Started
 
 ### Prerequisites
@@ -1010,18 +1022,6 @@ GET    /admin/docs                (Swagger UI)
 **Loopback-only management server.** `leafhub manage` binds to `127.0.0.1` only. Not designed to be network-exposed; the loopback bind is the primary security boundary in dev mode.
 
 **No runtime network dependency.** The SDK is pure local I/O — file reads and SQLite queries only. No HTTP calls, no daemon required.
-
----
-
-## Use Cases
-
-- **Stop putting API keys in `.env` files** — store once in the vault, reference by alias in code.
-- **Zero-touch onboarding** — link a directory once from the UI; the project auto-detects credentials on every subsequent startup without any manual step.
-- **Multiple projects, one credential store** — each project gets its own token and alias namespace without duplicating provider keys.
-- **Key rotation without code changes** — update the key in LeafHub; all projects reading that provider see the new key immediately.
-- **Single project, multiple agents** — create multiple same-name projects, each with an independent token scope.
-- **Standardized new-project setup** — any future project sources the `leafhub_dist/register.sh` integration block in its `setup.sh` and gets full credential management for free.
-- **Local Ollama + cloud fallback** — register both; switch bindings in the Web UI without touching application code.
 
 ---
 
