@@ -151,8 +151,12 @@ def _write_dotfile(project_dir: Path, project_name: str, raw_token: str) -> Path
 
 _LEAFHUB_DIST_DIR  = "leafhub_dist"
 
-# The canonical probe.py lives inside the leafhub package.
-_PROBE_SOURCE = Path(__file__).resolve().parents[1] / "probe.py"
+# Canonical source files inside the leafhub package directory.
+_PKG_DIR      = Path(__file__).resolve().parents[1]
+_PROBE_SOURCE = _PKG_DIR / "probe.py"
+
+# leafhub_dist protocol version — increment when the distributed file set changes.
+_DIST_VERSION = 2
 
 # __init__.py written into the distributed leafhub_dist/ directory.
 _DIST_INIT_PY = '''\
@@ -163,43 +167,26 @@ Written by ``leafhub register`` / ``leafhub project link`` on first
 registration.  Provides offline-capable shell integration (register.sh)
 and stdlib-only detection (probe.py) for the project's venv.
 
-IMPORTANT — two-tier dependency model
-──────────────────────────────────────
+Contents
+--------
+register.sh       Shell function for setup scripts (leafhub_setup_project).
+probe.py          Stdlib-only runtime detection (detect → open_sdk → get_key).
+setup_template.sh Ready-to-use setup.sh starting point for new projects.
+LEAFHUB.md        Full integration protocol and code templates.
+
+Two-tier dependency model
+--------------------------
 probe.detect()   — stdlib only; works without the leafhub pip package.
-found.open_sdk() — requires ``leafhub`` pip package (imports leafhub.sdk).
+found.open_sdk() — requires the ``leafhub`` pip package (imports leafhub.sdk).
 
-Projects that call open_sdk() (i.e. every project that actually uses
-credentials at runtime) must declare leafhub as a pip dependency:
-
-    # pyproject.toml
-    [project.optional-dependencies]
-    leafhub = ["leafhub @ git+https://github.com/Rebas9512/Leafhub.git"]
-
-    # setup.sh — after venv creation and main deps install
-    "$VENV_PIP" install -e "$SCRIPT_DIR[leafhub]" --quiet
-
-Import pattern:
-    try:
-        from leafhub.probe import detect       # pip package (preferred)
-    except ImportError:
-        from leafhub_dist.probe import detect  # this distributed copy
-
-    # Ensure project root is on sys.path so leafhub_dist is importable
-    # when leafhub pip package is absent (editable installs only expose
-    # named packages, not the project root):
-    import sys
-    from pathlib import Path
-    _root = str(Path(__file__).resolve().parents[1])
-    if _root not in sys.path:
-        sys.path.insert(0, _root)
-
-Do not edit probe.py or register.sh manually — they are managed by
-LeafHub and refreshed on every re-registration via:
-    leafhub register <project>
+See LEAFHUB.md for the complete integration guide.
+Do not edit these files manually — refreshed by: leafhub register <project>
 """
 from .probe import detect, register, ProbeResult
 
-__all__ = ["detect", "register", "ProbeResult"]
+__leafhub_dist_version__ = 2
+
+__all__ = ["detect", "register", "ProbeResult", "__leafhub_dist_version__"]
 '''
 
 
@@ -224,8 +211,13 @@ def _is_integrated(project_dir: Path) -> bool:
 def _write_dist_dir(project_dir: Path) -> None:
     """Write the ``leafhub_dist/`` integration module into *project_dir*.
 
-    Creates the directory, writes ``__init__.py``, copies ``probe.py`` from
-    the leafhub package, and copies ``register.sh`` from package data.
+    Creates the directory and writes five files:
+      - __init__.py        (generated from _DIST_INIT_PY template)
+      - probe.py           (copied from leafhub package)
+      - register.sh        (copied from package data)
+      - LEAFHUB.md         (copied from package data — protocol + templates)
+      - setup_template.sh  (copied from package data — setup.sh starter)
+
     All failures are silently ignored — the dotfile is the critical artefact.
     """
     import importlib.resources as _pkg_res
@@ -248,24 +240,30 @@ def _write_dist_dir(project_dir: Path) -> None:
     except Exception:
         pass
 
-    # register.sh — read from package data, fallback to repo root
-    try:
-        content = (
-            _pkg_res.files("leafhub")
-            .joinpath("register.sh")
-            .read_text(encoding="utf-8")
-        )
-        (dist_dir / "register.sh").write_text(content, encoding="utf-8")
-        return
-    except Exception:
-        pass
-    # Fallback: development checkout layout
-    # Path: src/leafhub/manage/projects.py → parents[3] = repo root
-    src = Path(__file__).resolve().parents[3] / "register.sh"
-    try:
-        shutil.copy2(src, dist_dir / "register.sh")
-    except Exception:
-        pass
+    # Package-data files: register.sh, LEAFHUB.md, setup_template.sh.
+    # Each is read from importlib.resources first (installed/editable),
+    # then falls back to the development checkout layout (repo root for
+    # register.sh; src/leafhub/ for the others).
+    _pkg_files = _pkg_res.files("leafhub")
+
+    def _copy_pkg_file(name: str, fallback: Path) -> None:
+        """Write *name* from package data into dist_dir, with a path fallback."""
+        try:
+            content = _pkg_files.joinpath(name).read_text(encoding="utf-8")
+            (dist_dir / name).write_text(content, encoding="utf-8")
+            return
+        except Exception:
+            pass
+        try:
+            shutil.copy2(fallback, dist_dir / name)
+        except Exception:
+            pass
+
+    # repo root for register.sh (legacy bootstrap URL points there)
+    _repo_root = Path(__file__).resolve().parents[3]
+    _copy_pkg_file("register.sh",       _repo_root / "register.sh")
+    _copy_pkg_file("LEAFHUB.md",        _PKG_DIR   / "LEAFHUB.md")
+    _copy_pkg_file("setup_template.sh", _PKG_DIR   / "setup_template.sh")
 
 
 def _distribute_integration_files(project_dir: Path) -> list[str]:
