@@ -644,7 +644,7 @@ class TestSameNameProjectsAPI(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6. probe.py copy — distributed on link / create-with-path
+# 6. leafhub_dist/ module — distributed on link / create-with-path (v2 standard)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @unittest.skipUnless(_FASTAPI, "FastAPI / starlette not installed")

@@ -170,7 +170,7 @@ class TestCmdRegister(unittest.TestCase):
                           path=str(self.proj_dir), alias="default", headless=True)
         with patch("leafhub.manage.projects._write_dotfile") as mock_dotfile, \
              patch("leafhub.manage.projects._distribute_integration_files",
-                   return_value=["register.sh", "leafhub_probe.py"]) as mock_dist:
+                   return_value=["leafhub_dist"]) as mock_dist:
             cmd_register(args)
         mock_dotfile.assert_called_once()
         mock_dist.assert_called_once()
