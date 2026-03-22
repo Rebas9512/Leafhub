@@ -11,7 +11,6 @@
 #    --reinstall     Delete and recreate the .venv
 #    --headless      Non-interactive / CI mode; sets --skip-setup
 #    --doctor        Run environment check only, then exit
-#    --uninstall     Remove symlink, PATH entries, and the project venv
 #
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -48,70 +47,19 @@ section() { echo ""; echo -e "${BOLD}── $* ──${NC}"; }
 REINSTALL=false
 HEADLESS=false
 DOCTOR=false
-UNINSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
         --reinstall)  REINSTALL=true ;;
         --headless)   HEADLESS=true ;;
         --doctor)     DOCTOR=true ;;
-        --uninstall)  UNINSTALL=true ;;
         --help|-h)
-            echo "Usage: ./setup.sh [--reinstall] [--headless] [--doctor] [--uninstall]"
+            echo "Usage: ./setup.sh [--reinstall] [--headless] [--doctor]"
             exit 0
             ;;
         *) warn "Unknown option: $arg  (ignored)" ;;
     esac
 done
-
-# ── Uninstall ─────────────────────────────────────────────────────────────────
-if [[ "$UNINSTALL" == "true" ]]; then
-    echo ""
-    echo -e "${BOLD}  LeafHub — Uninstall${NC}"
-
-    section "Removing CLI registration"
-    if [[ -L "$LEAFHUB_LINK" ]]; then
-        rm -f "$LEAFHUB_LINK"
-        ok "Removed symlink: $LEAFHUB_LINK"
-    else
-        warn "Symlink not found: $LEAFHUB_LINK"
-    fi
-
-    section "Cleaning shell rc files"
-    for rc in "${_RC_FILES[@]}"; do
-        [[ -f "$rc" ]] || continue
-        grep -qF "$_MARKER" "$rc" 2>/dev/null || continue
-        # Remove the block between markers
-        python3 - "$rc" "$_MARKER" "$_ENDMARK" <<'PY'
-import sys
-from pathlib import Path
-p = Path(sys.argv[1]); start = sys.argv[2]; end = sys.argv[3]
-lines = p.read_text().splitlines(keepends=True)
-out, inside = [], False
-for line in lines:
-    if start in line: inside = True; continue
-    if end in line:   inside = False; continue
-    if not inside: out.append(line)
-p.write_text("".join(out))
-PY
-        ok "Removed PATH block from $(basename "$rc")"
-    done
-
-    section "Removing venv"
-    if [[ -d "$VENV_DIR" ]]; then
-        rm -rf "$VENV_DIR"
-        ok "Removed: $VENV_DIR"
-    else
-        warn "Venv not found: $VENV_DIR"
-    fi
-
-    echo ""
-    echo -e "${BOLD}  Done.${NC}"
-    echo -e "  ${MUTED}~/.leafhub/ (API keys, DB) was NOT removed.${NC}"
-    echo -e "  ${MUTED}To delete your stored keys: rm -rf ~/.leafhub/${NC}"
-    echo ""
-    exit 0
-fi
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo ""
@@ -231,5 +179,5 @@ else
 fi
 echo ""
 echo -e "  ${MUTED}Data stored at: ~/.leafhub/${NC}"
-echo -e "  ${MUTED}To uninstall:   ./setup.sh --uninstall${NC}"
+echo -e "  ${MUTED}To uninstall:   leafhub uninstall${NC}"
 echo ""

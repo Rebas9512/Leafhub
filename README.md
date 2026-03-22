@@ -162,7 +162,6 @@ cd ui && npm install && npm run build && cd ..
 | `--reinstall` | Delete and recreate `.venv` (force clean install) |
 | `--headless` | Non-interactive / CI mode — no prompts |
 | `--doctor` | Run environment diagnostics only, then exit |
-| `--uninstall` | Remove the CLI symlink, PATH entries, and `.venv` |
 
 ---
 
@@ -180,14 +179,6 @@ Performs a complete, interactive two-step removal:
 2. **Remove LeafHub itself** — removes the `leafhub` CLI symlink and PATH block from shell RC files (POSIX) or the User PATH registry key (Windows), deletes `~/.leafhub/` (encrypted keys + DB), and deletes the install directory
 
 Requires two explicit `[y/N]` confirmations. See [§ `leafhub uninstall`](#leafhub-uninstall--full-removal) for the full output example.
-
-#### Lighter removal (keeps your data)
-
-```bash
-./setup.sh --uninstall
-```
-
-Removes only the CLI registration for this install: the `~/.local/bin/leafhub` symlink, the `# >>> leafhub PATH >>>` block from shell RC files, and the `.venv` directory. `~/.leafhub/` (your encrypted keys and project tokens) is **not** touched — run `leafhub uninstall` if you want to wipe everything.
 
 ---
 
@@ -1041,7 +1032,7 @@ Leafhub/
 │
 ├── pyproject.toml               # Project metadata and dependencies (PEP 517, src layout)
 ├── install.sh                   # macOS / Linux / WSL one-liner installer
-├── setup.sh                     # Unix manual setup: --reinstall / --uninstall / --doctor
+├── setup.sh                     # Unix manual setup: --reinstall / --doctor / --headless
 ├── install.ps1                  # Windows PowerShell installer
 ├── install.cmd                  # Windows CMD bootstrap → PowerShell
 ├── register.sh                  # Shell integration module (see Project Integration Standard)
