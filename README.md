@@ -383,7 +383,7 @@ The presence of `leafhub_dist/` in the project directory is the v2 integration m
    ├─ d) Auto-bind provider
    │      1 provider  → bound automatically under the requested alias
    │      N providers → user picks one interactively; headless picks first
-   │                    (first = smallest UUID, not most recently added)
+   │                    (first = most recently added, per ORDER BY created_at DESC)
    │      Already bound → skipped (INSERT OR REPLACE is safe if re-run)
    │      ⚠ Failure is printed to stderr but non-fatal — project remains
    │        linked; verify with `leafhub project show <name>` afterwards
@@ -424,7 +424,7 @@ leafhub_setup_project "my-app"        hub.get_key("rewrite")   ← must match
 
 3. **Binding is per-project, per-alias.** A project can have multiple aliases (e.g. `"chat"` and `"embed"`), each bound to a different provider. Register each alias separately.
 
-4. **`store.list_providers()` returns providers in UUID lexicographic order, not insertion order.** In headless mode with multiple providers, the first provider selected is whichever has the smallest UUID — not the most recently added. Verify binding with `leafhub project show <name>` after registration.
+4. **`store.list_providers()` returns providers ordered by `created_at DESC`.** In headless mode with multiple providers, the first provider selected is the most recently added one. Verify binding with `leafhub project show <name>` after registration.
 
 **Verifying the binding was created correctly:**
 

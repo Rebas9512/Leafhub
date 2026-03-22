@@ -1318,7 +1318,7 @@ def cmd_shell_helper(args: argparse.Namespace) -> None:
             "  Fetch directly: curl -fsSL "
             "https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh"
         )
-    print(register_sh.read_text(), end="")
+    print(register_sh.read_text(encoding="utf-8"), end="")
 
 
 # ── Argument parser ────────────────────────────────────────────────────────────

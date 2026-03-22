@@ -245,8 +245,13 @@ class TestCmdRegister(unittest.TestCase):
     # ── 1e. Multiple providers (headless): picks first ────────────────────────
 
     def test_1e_headless_multiple_providers_picks_first(self):
-        pid1 = _add_provider(self.store, self.hub, self.key, "OpenAI")
+        # Headless mode picks providers[0] from list_providers() which uses
+        # ORDER BY created_at DESC.  When two providers share the same timestamp
+        # the DB tie-breaks non-deterministically, so we query the expected
+        # winner from the store rather than hard-coding creation order.
+        _add_provider(self.store, self.hub, self.key, "OpenAI")
         _add_provider(self.store, self.hub, self.key, "Anthropic", "ak-test")
+        expected_pid = self.store.list_providers()[0].id
 
         self._run_register("multi-app", headless=True)
 
@@ -254,7 +259,7 @@ class TestCmdRegister(unittest.TestCase):
         try:
             p = s.find_project_by_name("multi-app")
             self.assertEqual(len(p.bindings), 1)
-            self.assertEqual(p.bindings[0].provider_id, pid1)
+            self.assertEqual(p.bindings[0].provider_id, expected_pid)
         finally:
             s.close()
 
