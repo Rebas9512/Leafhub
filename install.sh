@@ -144,13 +144,8 @@ if [[ -d "$LEAFHUB_DIR/.git" ]]; then
     [[ -z "$branch" ]] && branch="main"
     git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet
     ok "Updated to latest ($branch)."
-elif [[ -d "$LEAFHUB_DIR" ]] && [[ -n "$(ls -A "$LEAFHUB_DIR" 2>/dev/null)" ]]; then
-    info "Directory exists without .git — removing stale files..."
-    rm -rf "$LEAFHUB_DIR"
-    info "Cloning into $LEAFHUB_DIR ..."
-    git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
-    ok "Cloned."
 else
+    [[ -e "$LEAFHUB_DIR" ]] && { info "Removing stale directory $LEAFHUB_DIR ..."; rm -rf "$LEAFHUB_DIR"; }
     info "Cloning into $LEAFHUB_DIR ..."
     git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
     ok "Cloned."
