@@ -118,7 +118,7 @@ export const PROVIDER_PRESETS = [
     provider_type: 'custom',
     api_format:    'anthropic-messages',
     base_url:      'https://api.minimax.io/anthropic',
-    default_model: 'MiniMax-M2.5',
+    default_model: 'MiniMax-M2.7',
     auth_mode:     'bearer',
     auth_header:   '',
     extra_headers: { 'anthropic-version': '2023-06-01' },
