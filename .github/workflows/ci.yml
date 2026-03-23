@@ -41,6 +41,29 @@ jobs:
           # actually called — this is a belt-and-suspenders guard.
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
 
+  lint:
+    name: Lint & syntax checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: PS1 ASCII enforcement
+        run: |
+          for f in install.ps1; do
+            if grep -Pq '[^\x00-\x7F]' "$f"; then
+              echo "ERROR: $f contains non-ASCII characters"
+              grep -Pn '[^\x00-\x7F]' "$f"
+              exit 1
+            fi
+            echo "$f: ASCII OK"
+          done
+
+      - name: Shell script syntax
+        run: |
+          for f in install.sh setup.sh; do
+            [ -f "$f" ] && bash -n "$f" && echo "$f: syntax OK"
+          done
+
   ps1-syntax:
     name: PowerShell syntax check
     runs-on: windows-latest
