@@ -1305,16 +1305,14 @@ def cmd_register(args: argparse.Namespace) -> None:
             choice = "s"
 
         if choice in ("1", ""):
-            leafhub_bin = sys.argv[0]
+            leafhub_bin = shutil.which("leafhub") or sys.argv[0]
             popen_kwargs: dict = {}
             if sys.platform == "win32":
                 popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
                 popen_kwargs["start_new_session"] = True
             proc = subprocess.Popen(
-                [sys.executable, "-m", "leafhub", "manage", "--no-browser"]
-                if sys.platform == "win32"
-                else [leafhub_bin, "manage", "--no-browser"],
+                [leafhub_bin, "manage", "--no-browser"],
                 **popen_kwargs,
             )
             print()
