@@ -24,7 +24,7 @@ LEAFHUB_BIN=""
 LEAFHUB_LINK="$BIN_DIR/leafhub"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
-if [[ -n "${NO_COLOR:-}" || "${TERM:-dumb}" == "dumb" ]]; then
+if [[ ! -t 1 || -n "${NO_COLOR:-}" || "${TERM:-dumb}" == "dumb" ]]; then
     BOLD='' GREEN='' YELLOW='' RED='' MUTED='' NC=''
 else
     BOLD='\033[1m'
