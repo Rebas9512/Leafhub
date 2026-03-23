@@ -61,7 +61,9 @@ if ($InstallDir.StartsWith('~\')) { $InstallDir = Join-Path $env:USERPROFILE $In
 elseif ($InstallDir -eq "~")     { $InstallDir = $env:USERPROFILE }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 
-# Redirect into a subdirectory if the target is non-empty and not a git repo
+if ((Test-Path $InstallDir) -and -not (Test-Path $InstallDir -PathType Container)) {
+    Remove-Item -Force $InstallDir
+}
 if (-not (Test-Path (Join-Path $InstallDir ".git"))) {
     if ((Test-Path $InstallDir -PathType Container) -and (Test-DirHasEntries $InstallDir)) {
         $InstallDir = [IO.Path]::GetFullPath((Join-Path $InstallDir "leafhub"))
