@@ -195,22 +195,41 @@ class TestCmdRegister(unittest.TestCase):
         # Create the project first
         self._run_register("relink-app")
 
-        # Create a second project dir and re-run register
-        second_dir = self.tmp_path / "second"
-        second_dir.mkdir()
-
+        # Re-run register with the SAME path — should reuse (not duplicate)
         from leafhub.cli import cmd_register
         args = _make_args(project_name="relink-app",
-                          path=str(second_dir), alias="default", headless=True)
+                          path=str(self.proj_dir), alias="default", headless=True)
         with patch("leafhub.manage.projects._write_dotfile"):
             cmd_register(args)
 
-        # Must still be exactly one project with this name (no duplicate)
+        # Must still be exactly one project (same path = reused)
         s = self._reload_store()
         try:
             projects = [p for p in s.list_projects() if p.name == "relink-app"]
             self.assertEqual(len(projects), 1, "re-link must not create a duplicate")
-            self.assertEqual(Path(projects[0].path).resolve(), second_dir.resolve())
+            self.assertEqual(Path(projects[0].path).resolve(), self.proj_dir.resolve())
+        finally:
+            s.close()
+
+    def test_1b_different_path_creates_new_project(self):
+        # Create the project first
+        self._run_register("multi-path-app")
+
+        # Register with a DIFFERENT path — should create a new project
+        second_dir = self.tmp_path / "second"
+        second_dir.mkdir()
+
+        from leafhub.cli import cmd_register
+        args = _make_args(project_name="multi-path-app",
+                          path=str(second_dir), alias="default", headless=True)
+        with patch("leafhub.manage.projects._write_dotfile"):
+            cmd_register(args)
+
+        s = self._reload_store()
+        try:
+            projects = [p for p in s.list_projects() if p.name == "multi-path-app"]
+            self.assertEqual(len(projects), 2,
+                             "different paths must create separate projects")
         finally:
             s.close()
 
@@ -387,12 +406,11 @@ class TestIfNotExists(unittest.TestCase):
             s.close()
 
     def test_3b_existing_project_relinked_no_duplicate(self):
+        """Same path + --if-not-exists → reuse, no duplicate."""
         self._run_create("existing", if_not_exists=False)
 
-        # Second call with --if-not-exists must re-link, not create a duplicate
-        second_dir = self.tmp_path / "second"
-        second_dir.mkdir()
-        self._run_create("existing", path=second_dir, if_not_exists=True)
+        # Second call with --if-not-exists and SAME path must reuse
+        self._run_create("existing", if_not_exists=True)
 
         s = self._reload_store()
         try:
@@ -402,16 +420,19 @@ class TestIfNotExists(unittest.TestCase):
         finally:
             s.close()
 
-    def test_3b_existing_project_path_updated(self):
-        self._run_create("path-update", if_not_exists=False)
+    def test_3b_different_path_creates_new_project(self):
+        """Different path + --if-not-exists + same name → new project."""
+        self._run_create("multi-app", if_not_exists=False)
+
         second_dir = self.tmp_path / "second2"
         second_dir.mkdir()
-        self._run_create("path-update", path=second_dir, if_not_exists=True)
+        self._run_create("multi-app", path=second_dir, if_not_exists=True)
 
         s = self._reload_store()
         try:
-            p = s.find_project_by_name("path-update")
-            self.assertEqual(Path(p.path).resolve(), second_dir.resolve())
+            matches = [p for p in s.list_projects() if p.name == "multi-app"]
+            self.assertEqual(len(matches), 2,
+                             "different paths must create separate projects")
         finally:
             s.close()
 
