@@ -19,13 +19,14 @@ param(
 $ErrorActionPreference = "Stop"
 $DefaultInstallDir = Join-Path $env:USERPROFILE "leafhub"
 
-# ANSI colours — PowerShell 7+ / Windows Terminal
-$GREEN  = "`e[38;2;0;229;180m"
-$YELLOW = "`e[38;2;255;176;32m"
-$RED    = "`e[38;2;230;57;70m"
-$MUTED  = "`e[38;2;110;120;148m"
-$BOLD   = "`e[1m"
-$NC     = "`e[0m"
+# ANSI colours — works on PowerShell 5.1+ and Windows Terminal
+$ESC    = [char]0x1b
+$GREEN  = "${ESC}[38;2;0;229;180m"
+$YELLOW = "${ESC}[38;2;255;176;32m"
+$RED    = "${ESC}[38;2;230;57;70m"
+$MUTED  = "${ESC}[38;2;110;120;148m"
+$BOLD   = "${ESC}[1m"
+$NC     = "${ESC}[0m"
 
 function Write-Ok($msg)      { Microsoft.PowerShell.Utility\Write-Host "${GREEN}√${NC}  $msg" }
 function Write-Info($msg)    { Microsoft.PowerShell.Utility\Write-Host "${MUTED}·${NC}  $msg" }

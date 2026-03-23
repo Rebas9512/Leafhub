@@ -795,6 +795,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
     dev        = getattr(args, "dev",        False)
     rebuild    = getattr(args, "rebuild",    False)
     no_browser = getattr(args, "no_browser", False)
+    _win       = sys.platform == "win32"
 
     try:
         from .manage.server import run_server
@@ -818,7 +819,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
     def _npm_install() -> None:
         if not (ui_dir / "node_modules").exists():
             print("  Installing npm dependencies...")
-            subprocess.run(["npm", "install"], cwd=ui_dir, check=True)
+            subprocess.run(["npm", "install"], cwd=ui_dir, check=True, shell=_win)
 
     def _build_ui() -> None:
         if ui_dist.exists() and not rebuild:
@@ -827,7 +828,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
         _npm_install()
         action = "Rebuilding" if ui_dist.exists() else "Building"
         print(f"  {action} Vue UI (first run may take a few seconds)...")
-        subprocess.run(["npm", "run", "build"], cwd=ui_dir, check=True)
+        subprocess.run(["npm", "run", "build"], cwd=ui_dir, check=True, shell=_win)
         print("  UI build complete.\n")
 
     def _open_browser(url: str, delay: float = 1.5) -> None:
@@ -889,7 +890,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
         print(f"  API docs       : {api_url}/admin/docs")
         print("Press Ctrl+C to stop.\n")
         _free_port(port)
-        vite = subprocess.Popen(["npm", "run", "dev"], cwd=ui_dir)
+        vite = subprocess.Popen(["npm", "run", "dev"], cwd=ui_dir, shell=_win)
         try:
             if not no_browser:
                 _open_browser(ui_url, delay=2.5)
@@ -1305,9 +1306,16 @@ def cmd_register(args: argparse.Namespace) -> None:
 
         if choice in ("1", ""):
             leafhub_bin = sys.argv[0]
+            popen_kwargs: dict = {}
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
             proc = subprocess.Popen(
-                [leafhub_bin, "manage", "--no-browser"],
-                start_new_session=True,
+                [sys.executable, "-m", "leafhub", "manage", "--no-browser"]
+                if sys.platform == "win32"
+                else [leafhub_bin, "manage", "--no-browser"],
+                **popen_kwargs,
             )
             print()
             print("  Web UI running at http://localhost:8765")

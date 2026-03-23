@@ -40,3 +40,22 @@ jobs:
           # Tests inject LEAFHUB_MASTER_KEY via fixtures so keyring is never
           # actually called — this is a belt-and-suspenders guard.
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+
+  ps1-syntax:
+    name: PowerShell syntax check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Validate install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/install.ps1", [ref]$null, [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          Write-Host "install.ps1 syntax OK"
