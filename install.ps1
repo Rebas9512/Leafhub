@@ -33,6 +33,7 @@ function Write-Info($msg)    { Microsoft.PowerShell.Utility\Write-Host "${MUTED}
 function Write-Warn($msg)    { Microsoft.PowerShell.Utility\Write-Host "${YELLOW}!${NC}  $msg" }
 function Write-Section($msg) { Microsoft.PowerShell.Utility\Write-Host ""; Microsoft.PowerShell.Utility\Write-Host "${BOLD}-- $msg --${NC}" }
 function Write-Fail($msg)    { Microsoft.PowerShell.Utility\Write-Host "${RED}x${NC}  $msg"; exit 1 }
+function Assert-ExitCode($msg) { if ($LASTEXITCODE -ne 0) { Write-Fail "$msg (exit code $LASTEXITCODE)" } }
 
 function Test-DirHasEntries([string]$Dir) {
     if (-not (Test-Path $Dir -PathType Container)) { return $false }
@@ -125,10 +126,16 @@ $RepoUrl = if ($env:LEAFHUB_REPO_URL) { $env:LEAFHUB_REPO_URL } else { "https://
 if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Info "Existing installation found -- updating..."
     git -C $InstallDir pull --ff-only --quiet
+    Assert-ExitCode "git pull failed"
     Write-Ok "Updated to latest."
 } else {
+    if ((Test-Path $InstallDir -PathType Container) -and (Test-DirHasEntries $InstallDir)) {
+        Write-Info "Removing incomplete previous install at $InstallDir ..."
+        Remove-Item -Recurse -Force $InstallDir
+    }
     Write-Info "Cloning into $InstallDir ..."
     git clone --depth=1 $RepoUrl $InstallDir --quiet
+    Assert-ExitCode "git clone failed"
     Write-Ok "Cloned."
 }
 
@@ -138,6 +145,7 @@ Write-Section "Virtual environment"
 if (-not (Test-Path $VenvPython)) {
     Write-Info "Creating .venv ..."
     & $Python -m venv $VenvDir
+    Assert-ExitCode "Failed to create virtual environment"
     Write-Ok "Venv created."
 } else {
     Write-Ok "Venv exists -- reusing."
@@ -145,9 +153,11 @@ if (-not (Test-Path $VenvPython)) {
 
 Write-Info "Upgrading pip and setuptools ..."
 & $VenvPython -m pip install --upgrade pip setuptools --quiet
+Assert-ExitCode "pip upgrade failed"
 
 Write-Info "Installing leafhub[manage] ..."
 & $VenvPip install -e "$InstallDir[manage]" --quiet
+Assert-ExitCode "Package install failed"
 Write-Ok "Package installed."
 
 # -- PATH ----------------------------------------------------------------------
