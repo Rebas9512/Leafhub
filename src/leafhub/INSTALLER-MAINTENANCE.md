@@ -355,7 +355,9 @@ The `leafhub register --headless` command:
 
 ---
 
-## 4. PowerShell 5.1 Constraints
+## 4. PowerShell Design Standards & 5.1 Constraints
+
+All `.ps1` installer scripts must run correctly under **both** `powershell.exe` (5.1, ships with Windows 10/11) and `pwsh` (7+). The lowest common denominator is 5.1 because `install.cmd` invokes `powershell.exe`.
 
 ### 4.1 Encoding: Pure ASCII Only (CRITICAL)
 
@@ -371,36 +373,224 @@ UTF-8 multi-byte sequences containing bytes `0x91`-`0x94` map to **quote charact
 
 **Rule: All `.ps1` files must contain only ASCII (bytes 0x00-0x7F).**
 
-Replacements: `--` -> `--`, `-` -> `-`, `+` -> `+`, `.` -> `.`, `x` -> `x`
+Safe replacements:
+| Original | Replacement | Context |
+|----------|-------------|---------|
+| `--` (em dash) | `--` | Text, comments |
+| `--` (en dash) | `-` | Text, comments |
+| `-` (box drawing) | `-` | Section borders |
+| `+` (checkmark U+221A) | `+` | Write-Ok prefix |
+| `.` (middle dot U+00B7) | `.` | Write-Info prefix |
+| `x` (cross mark U+2717) | `x` | Write-Fail prefix |
 
-CI check:
+CI check (must be in every project):
 ```bash
 grep -P '[^\x00-\x7F]' install.ps1 && exit 1
 ```
 
 ### 4.2 ANSI Escape Sequences
 
-`` `e `` is PS 7+ only. Use `[char]0x1b`:
+`` `e `` is PS 7+ only. PS 5.1 treats it as literal `e`, corrupting every ANSI color string and causing cascade parse errors.
 
 ```powershell
+# WRONG (PS 7+ only)
+$GREEN = "`e[38;2;0;229;180m"
+
+# CORRECT (PS 5.1+)
 $ESC = [char]0x1b
 $GREEN = "${ESC}[38;2;0;229;180m"
 ```
 
-### 4.3 $ErrorActionPreference vs Native Commands
+**Rule:** Define `$ESC = [char]0x1b` once at the top of every PS1 file that uses ANSI colors. Use `${ESC}` (with curly braces) in all color definitions to avoid ambiguity with `$E` etc.
 
-`$ErrorActionPreference = "Stop"` does NOT catch external command failures. Always use:
+### 4.3 Standard Helper Functions
+
+Every `install.ps1` must define these helpers near the top:
 
 ```powershell
-git clone ... --quiet
-Assert-ExitCode "git clone failed"
+$ESC = [char]0x1b
+$GREEN = "${ESC}[38;2;0;229;180m"; $RED = "${ESC}[38;2;230;57;70m"
+$MUTED = "${ESC}[38;2;110;120;148m"; $BOLD = "${ESC}[1m"; $NC = "${ESC}[0m"
+
+function Write-Ok($msg)   { Write-Host "${GREEN}+${NC}  $msg" }
+function Write-Info($msg) { Write-Host "${MUTED}.${NC}  $msg" }
+function Write-Fail($msg) { Write-Host "${RED}x${NC}  $msg"; exit 1 }
+
+function Assert-ExitCode($msg) {
+    if ($LASTEXITCODE -ne 0) { Write-Fail "$msg (exit code $LASTEXITCODE)" }
+}
 ```
 
-### 4.4 Native Command Stderr
+**Note on `Write-Host` in LeafHub:** LeafHub's `install.ps1` uses `Microsoft.PowerShell.Utility\Write-Host` (fully qualified) to avoid conflicts if a child project redefines `Write-Host`. Child projects do not need this.
 
-PS 5.1 + `$ErrorActionPreference = "Stop"` converts native command stderr into a **terminating error** that `2>$null` and even `try/catch` cannot fully suppress. This specifically affects commands that output Unicode to stderr (e.g., `leafhub provider list` with table-drawing characters).
+### 4.4 $ErrorActionPreference vs Native Commands
 
-**Rule: Do not capture or check output of native commands that may emit non-ASCII. Check exit codes only, or avoid the call.**
+`$ErrorActionPreference = "Stop"` only catches **PowerShell cmdlet** errors, NOT external command failures (`git`, `python`, `pip`, `npm`).
+
+```powershell
+# WRONG -- git failure is silently ignored, next line runs
+git clone --depth=1 $url $dir --quiet
+Write-Ok "Cloned."
+
+# CORRECT
+git clone --depth=1 $url $dir --quiet
+Assert-ExitCode "git clone failed"
+Write-Ok "Cloned."
+```
+
+**Rule:** Every call to `git`, `python`, `pip`, `npm`, or any `.exe` must be followed by `Assert-ExitCode` unless the failure is intentionally ignored (in which case add `2>$null` and a comment explaining why).
+
+### 4.5 Native Command Stderr as Terminating Error
+
+PS 5.1 with `$ErrorActionPreference = "Stop"` converts ANY native command stderr output into a **terminating error**. This is NOT fixable with `2>$null` or `try/catch` -- the error fires before redirection takes effect.
+
+This specifically breaks:
+- Commands that emit warnings to stderr (pip deprecation warnings, git progress)
+- Commands that output Unicode to stderr (leafhub table output with box-drawing chars)
+- Any `& $cmd ... 2>$null` where `$cmd` writes to stderr
+
+**Rules:**
+1. Never capture output of native commands into variables (`$result = & $cmd ...`) when the command may write to stderr
+2. Never verify native commands by parsing their output -- check `$LASTEXITCODE` only
+3. If you must ignore stderr, use `2>$null` on commands you're certain produce only ASCII stderr
+4. For checking command existence, use `Get-Command -ErrorAction SilentlyContinue` (PS cmdlet) not `& which ...` (native)
+
+### 4.6 Interactive Input Detection
+
+To determine if the script can prompt the user:
+
+```powershell
+$canPrompt = $false
+try { $canPrompt = -not [Console]::IsInputRedirected } catch {}
+```
+
+This returns `$false` when:
+- Running via `irm ... | iex` (stdin is the script content, not the terminal)
+- Running in CI / headless mode
+- Running as a scheduled task
+
+When `$canPrompt` is `$false`, use default values for all choices and do not call `Read-Host`.
+
+**Note:** The `$Headless` switch parameter provides an explicit override. Check both:
+```powershell
+if ($canPrompt -and -not $Headless) {
+    $raw = Read-Host "Install directory [$DefaultInstallDir]"
+}
+```
+
+### 4.7 Variable Naming Conventions
+
+| Pattern | Example | Usage |
+|---------|---------|-------|
+| `$PascalCase` | `$InstallDir`, `$VenvDir` | All script-level variables |
+| `${ESC}` | `${ESC}[38;2;...` | ANSI escape -- curly braces required to avoid `$E` |
+| `$env:VAR` | `$env:USERPROFILE` | Environment variables |
+| `PascalCase` functions | `Write-Ok`, `Assert-ExitCode`, `Find-Python` | All functions follow PS verb-noun convention |
+| `$_camelCase` | (avoid) | Only for pipeline variables (`$_`) |
+
+### 4.8 String Quoting Rules
+
+| Syntax | Behaviour | Use when |
+|--------|-----------|----------|
+| `"double quotes"` | Interpolates `$var` and `` `n `` | String contains variables: `"Install path: $InstallDir"` |
+| `'single quotes'` | Literal, no interpolation | Strings with `$` meant literally: `'$env:PATH'`, Python code |
+| `` `n `` | Newline (in double-quoted strings) | Multi-line error messages: `` "Line 1.`n  Line 2." `` |
+| `` `" `` | Escaped double quote inside double-quoted string | Path quoting in output: `` "git -C `"$dir`" pull" `` |
+
+**Gotcha:** Single quotes inside double-quoted strings are literal (no escaping needed). This is safe:
+```powershell
+$result = & $cmd -c "import sys; print(f'{sys.version_info.major}')" 2>$null
+```
+The Python f-string `'{...}'` is fine because PS only interprets `$` for interpolation in double-quoted strings.
+
+### 4.9 Path Handling
+
+```powershell
+# Normalize to absolute path (resolves relative paths, ., ..)
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+
+# ~ expansion (PS doesn't expand ~ in -File mode)
+if ($InstallDir -eq "~") { $InstallDir = $env:USERPROFILE }
+elseif ($InstallDir.StartsWith("~\")) {
+    $InstallDir = Join-Path $env:USERPROFILE $InstallDir.Substring(2)
+}
+
+# Join paths (never use string concatenation with \)
+$VenvDir = Join-Path $InstallDir ".venv"        # CORRECT
+$VenvDir = "$InstallDir\.venv"                   # WRONG (breaks on trailing \)
+
+# Check path type (file vs directory)
+Test-Path $path                                   # exists at all?
+Test-Path $path -PathType Container               # is a directory?
+Test-Path $path -PathType Leaf                     # is a file?
+```
+
+### 4.10 Process Management (Windows)
+
+Starting a background process reliably on Windows:
+
+```powershell
+# Start-Process is reliable (avoids python subprocess issues)
+$proc = Start-Process -FilePath $exe -ArgumentList "arg1","arg2" -PassThru -WindowStyle Hidden
+
+# Wait and kill
+Start-Sleep -Seconds 3  # give it time to start
+Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+```
+
+**Never use these for background processes in install scripts:**
+- `subprocess.Popen` from Python (has __main__.py, PATH, pip cache issues)
+- `Start-Job` (runs in a separate session without current PATH/env)
+- `& $cmd &` (not supported in PS; `&` is the call operator, not backgrounding)
+
+### 4.11 Writing to User PATH
+
+```powershell
+# Read current user PATH
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (-not $userPath) { $userPath = "" }
+
+# Add entry if not already present (case-insensitive check)
+if ($userPath -notlike "*$ScriptsDir*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$ScriptsDir", "User")
+}
+
+# Also update current session (for irm | iex users)
+$env:Path = "$ScriptsDir;$env:Path"
+```
+
+**Important:** `[Environment]::SetEnvironmentVariable(..., "User")` writes to the registry (`HKCU\Environment`). The change takes effect in new terminal sessions. The `$env:Path` update makes it work in the current PS session. The `install.cmd` wrapper handles CMD sessions separately via `reg query`.
+
+### 4.12 Execution Policy
+
+Not all users have `RemoteSigned` enabled. Handle gracefully:
+
+```powershell
+$policy = Get-ExecutionPolicy
+if ($policy -eq "Restricted" -or $policy -eq "AllSigned") {
+    try {
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
+    } catch {
+        Write-Fail "Cannot set execution policy.`n  Run as Admin: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"
+    }
+}
+```
+
+The `-Scope Process` flag only affects the current session and does not require admin rights. The `install.cmd` wrapper also passes `-ExecutionPolicy Bypass` when invoking `powershell.exe`.
+
+### 4.13 Differences Between `-File` and `iex` Modes
+
+| Behaviour | `powershell -File script.ps1` (CMD path) | `irm url \| iex` (PS direct) |
+|-----------|------------------------------------------|-------------------------------|
+| Encoding | Windows-1252 (no BOM) / UTF-8 (with BOM) | UTF-8 (HTTP response) |
+| `$PSScriptRoot` | Set to script directory | Empty / not set |
+| `param()` block | Parsed; arguments passed via CLI | **Ignored** (piped string) |
+| `[Console]::IsInputRedirected` | `$false` (can prompt) | `$true` (stdin is script) |
+| `$ErrorActionPreference` | Script's setting respected | Inherits from session |
+
+**Key implication:** `irm | iex` cannot prompt via `Read-Host` because stdin is redirected. The `$canPrompt` check (section 4.6) handles this automatically. Users who need parameters with `irm` must use the scriptblock form:
+```powershell
+& ([scriptblock]::Create((irm https://...install.ps1))) -InstallDir C:\custom
 
 ---
 
