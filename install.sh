@@ -138,9 +138,18 @@ command -v git >/dev/null 2>&1 || fail "git is required but not found."
 section "Installing LeafHub"
 
 if [[ -d "$LEAFHUB_DIR/.git" ]]; then
-    info "Existing installation found — updating..."
-    git -C "$LEAFHUB_DIR" pull --ff-only --quiet
-    ok "Updated to latest."
+    info "Existing installation found — syncing to latest..."
+    git -C "$LEAFHUB_DIR" fetch origin --quiet
+    branch="$(git -C "$LEAFHUB_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')"
+    [[ -z "$branch" ]] && branch="main"
+    git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet
+    ok "Updated to latest ($branch)."
+elif [[ -d "$LEAFHUB_DIR" ]] && [[ -n "$(ls -A "$LEAFHUB_DIR" 2>/dev/null)" ]]; then
+    info "Directory exists without .git — removing stale files..."
+    rm -rf "$LEAFHUB_DIR"
+    info "Cloning into $LEAFHUB_DIR ..."
+    git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
+    ok "Cloned."
 else
     info "Cloning into $LEAFHUB_DIR ..."
     git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
