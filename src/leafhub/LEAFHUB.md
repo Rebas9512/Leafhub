@@ -141,6 +141,12 @@ The Responses API requires a different payload shape. If your code builds API re
 | Temperature | `temperature: 0.7` | **not supported** — omit |
 | Max tokens | `max_tokens: N` | **not supported** — omit |
 | Response format | `choices[0].message.content` | SSE `response.output_text.delta` events, or `output[].content[].text` (non-streaming fallback) |
+| Image input | `{"type": "image_url", "image_url": {"url": "data:..."}}` | `{"type": "input_image", "image_url": "data:..."}` (plain string, not nested object) |
+| Text input | `{"type": "text", "text": "..."}` | `{"type": "input_text", "text": "..."}` |
+
+**`instructions` is required.** Unlike Chat Completions where a system message is optional, the Codex endpoint returns `400: Instructions are required` if you omit the `instructions` field. Always pass it, even for trivial requests (e.g. capability probes).
+
+**Image input validation is stricter.** The Codex endpoint rejects very small images (e.g. 1×1 PNG) with `400: The image data you provided does not represent a valid image`. Use at least an 8×8 image for probes or tests.
 
 Use `cfg.api_format` from `get_config()` to decide which payload shape to build.
 

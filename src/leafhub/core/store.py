@@ -460,6 +460,19 @@ class SyncStore:
         ).fetchone()
         return self._row_to_project(row) if row else None
 
+    def find_project_by_path(self, path: str) -> Project | None:
+        """Return the active project linked to *path*, or None.
+
+        Path-based dedup is preferred over name-based dedup because a single
+        project directory may be registered under different names (e.g. when
+        multiple agents share one codebase).
+        """
+        row = self._conn.execute(
+            "SELECT * FROM projects WHERE path = ? AND is_active = 1 LIMIT 1",
+            (path,),
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
     def close(self) -> None:
         """Close the underlying database connection."""
         self._conn.close()

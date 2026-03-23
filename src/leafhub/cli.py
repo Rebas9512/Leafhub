@@ -341,9 +341,14 @@ def cmd_project_create(args: argparse.Namespace) -> None:
 
     store, hub_dir = _open_store()
     try:
-        # --if-not-exists: re-link silently if project already registered
+        # --if-not-exists: re-link silently if project already registered.
+        # Prefer path-based dedup when a path is given (a single directory may
+        # be registered under different names), fall back to name when no path.
         if if_not_exists:
-            existing = store.find_project_by_name(name)
+            existing = (
+                store.find_project_by_path(str(link_path)) if link_path
+                else store.find_project_by_name(name)
+            )
             if existing is not None:
                 if link_path is not None:
                     raw_token = store.rotate_token(existing.id)
@@ -1219,14 +1224,24 @@ def cmd_register(args: argparse.Namespace) -> None:
         _die(f"Project directory not found: {path}")
 
     # ── 1. Create or re-link project ─────────────────────────────────────────
+    # Dedup by PATH (not name): a single directory may be registered under
+    # different names when multiple agents share one codebase, and different
+    # directories may legitimately share the same project name.
     # Capture hub_dir before entering the try block so it remains accessible
     # later in the function (Python has no block scoping).
     store, hub_dir = _open_store()
     try:
-        existing = store.find_project_by_name(name)
+        existing = store.find_project_by_path(str(path))
         if existing is not None:
+            # Same directory already registered — reuse the project record.
+            # Update name if the caller chose a different one this time.
+            if existing.name != name:
+                store._conn.execute(
+                    "UPDATE projects SET name = ? WHERE id = ?",
+                    (name, existing.id),
+                )
+                store._conn.commit()
             raw_token = store.rotate_token(existing.id)
-            store.set_project_path(existing.id, str(path))
             project_id = existing.id
             _write_dotfile(path, name, raw_token)
             # Already integrated — only refresh .leafhub; leave existing files alone.

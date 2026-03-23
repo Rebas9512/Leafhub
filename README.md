@@ -8,6 +8,12 @@ A local encrypted API key vault for LLM projects. Store provider credentials onc
 
 Projects **auto-detect** their credentials on startup via a `.leafhub` dotfile that LeafHub writes when you link a directory. No token management in application code.
 
+## Preview
+
+![LeafHub Web UI — Providers](screenshot/screenshot1.png)
+
+![LeafHub Web UI — Projects](screenshot/screenshot2.png)
+
 ---
 
 ## Install
