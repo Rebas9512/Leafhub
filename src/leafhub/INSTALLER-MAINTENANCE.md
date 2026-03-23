@@ -538,7 +538,65 @@ fi
 ln -sf "$target" "$link"
 ```
 
-## 4.11 stdout Buffering
+## 4.11 `curl | bash` and stdin Redirection (CRITICAL)
+
+When a script runs via `curl ... | bash`, **stdin is the script content**, not the user's terminal. This has two major consequences:
+
+1. **`sys.stdin.isatty()` returns `False` in Python subprocesses** -- any Python CLI (like `leafhub register`) that checks `isatty()` will think it's in headless mode and skip interactive prompts (provider setup, etc.)
+
+2. **`read` in bash reads from the pipe** (the script), not the user -- use `/dev/tty`
+
+**Rule: The parent shell script must handle ALL interactive prompts itself, not delegate to Python subprocesses.**
+
+```bash
+# WRONG -- leafhub register sees non-tty stdin, skips provider setup
+"$LEAFHUB_BIN" register "$PROJECT" --path "$DIR" --alias llm
+
+# CORRECT -- register headless, then prompt from the shell script
+"$LEAFHUB_BIN" register "$PROJECT" --path "$DIR" --alias llm --headless
+
+# Check if providers need setup
+if [[ "$_has_providers" == "false" ]]; then
+    printf "  Choice [1]: "
+    IFS= read -r _choice < /dev/tty    # read from terminal, not pipe
+
+    if [[ "$_choice" == "1" ]]; then
+        "$LEAFHUB_BIN" manage --no-browser &    # background process
+        _manage_pid=$!
+        sleep 3
+        open "http://localhost:8765"             # macOS
+        printf "\n  Press Enter when done... "
+        IFS= read -r _ < /dev/tty
+        kill "$_manage_pid" 2>/dev/null
+        # Re-register to pick up new provider
+        "$LEAFHUB_BIN" register "$PROJECT" --path "$DIR" --alias llm --headless
+    elif [[ "$_choice" == "2" ]]; then
+        "$LEAFHUB_BIN" provider add < /dev/tty   # redirect tty to provider add
+    fi
+fi
+```
+
+### Browser Opening (Cross-Platform)
+
+```bash
+if command -v open >/dev/null 2>&1; then open "$url"            # macOS
+elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"  # Linux
+elif command -v wslview >/dev/null 2>&1; then wslview "$url"     # WSL
+fi
+```
+
+### Background Process Management
+
+```bash
+"$LEAFHUB_BIN" manage --no-browser &
+_manage_pid=$!
+sleep 3                                    # wait for server to start
+# ... user does their thing ...
+kill "$_manage_pid" 2>/dev/null || true    # graceful stop
+wait "$_manage_pid" 2>/dev/null || true    # reap zombie
+```
+
+## 4.12 stdout Buffering
 
 Python may block-buffer stdout on some terminals (especially Windows PowerShell). Long operations (LLM calls) can appear to hang because the "Done" message stays in the buffer.
 
@@ -749,7 +807,7 @@ python -m py_compile <project>/cli.py
 |----------|--------|
 | Fresh install (CMD) | Full flow, CLI in same terminal |
 | Fresh install (irm \| iex) | Full flow |
-| Fresh install (curl \| bash) | Full flow on macOS + Linux |
+| Fresh install (curl \| bash) | Full flow; provider prompt via /dev/tty; Web UI starts |
 | Re-install over existing | .leafhub preserved, no re-prompt |
 | File at install path | Removed, install succeeds |
 | Without leafhub | Auto-install triggered |
@@ -779,3 +837,6 @@ python -m py_compile <project>/cli.py
 | 15 | leafhub uninstall crash | Missing import os | Added import |
 | 16 | Setup repeats | .leafhub destroyed | Fixed by #14 |
 | 17 | pip cached old code | Wheel cache by URL | --no-cache-dir |
+| 18 | macOS: provider setup skipped | `curl\|bash` stdin = pipe, `sys.stdin.isatty()` = False in leafhub | setup.sh handles prompts itself via `/dev/tty` |
+| 19 | macOS: wrong CLI hint | `leafscan run` doesn't exist | Changed to `leafscan scan <url>` |
+| 20 | macOS: stdout buffered after LLM call | Python block-buffers on some terminals | `flush=True` on all print() |
