@@ -169,10 +169,11 @@ and stdlib-only detection (probe.py) for the project's venv.
 
 Contents
 --------
-register.sh       Shell function for setup scripts (leafhub_setup_project).
-probe.py          Stdlib-only runtime detection (detect → open_sdk → get_key).
-setup_template.sh Ready-to-use setup.sh starting point for new projects.
-LEAFHUB.md        Full integration protocol and code templates.
+register.sh                Shell function for setup scripts (leafhub_setup_project).
+probe.py                   Stdlib-only runtime detection (detect -> open_sdk -> get_key).
+setup_template.sh          Ready-to-use setup.sh starting point for new projects.
+LEAFHUB.md                 Full integration protocol and code templates.
+INSTALLER-MAINTENANCE.md   Installer CI/CD guide for cross-project standardisation.
 
 Two-tier dependency model
 --------------------------
@@ -211,12 +212,13 @@ def _is_integrated(project_dir: Path) -> bool:
 def _write_dist_dir(project_dir: Path) -> None:
     """Write the ``leafhub_dist/`` integration module into *project_dir*.
 
-    Creates the directory and writes five files:
-      - __init__.py        (generated from _DIST_INIT_PY template)
-      - probe.py           (copied from leafhub package)
-      - register.sh        (copied from package data)
-      - LEAFHUB.md         (copied from package data — protocol + templates)
-      - setup_template.sh  (copied from package data — setup.sh starter)
+    Creates the directory and writes six files:
+      - __init__.py                (generated from _DIST_INIT_PY template)
+      - probe.py                   (copied from leafhub package)
+      - register.sh                (copied from package data)
+      - LEAFHUB.md                 (copied from package data — protocol + templates)
+      - setup_template.sh          (copied from package data — setup.sh starter)
+      - INSTALLER-MAINTENANCE.md   (copied from package data — installer CI/CD guide)
 
     All failures are silently ignored — the dotfile is the critical artefact.
     """
@@ -261,9 +263,10 @@ def _write_dist_dir(project_dir: Path) -> None:
 
     # repo root for register.sh (legacy bootstrap URL points there)
     _repo_root = Path(__file__).resolve().parents[3]
-    _copy_pkg_file("register.sh",       _repo_root / "register.sh")
-    _copy_pkg_file("LEAFHUB.md",        _PKG_DIR   / "LEAFHUB.md")
-    _copy_pkg_file("setup_template.sh", _PKG_DIR   / "setup_template.sh")
+    _copy_pkg_file("register.sh",               _repo_root / "register.sh")
+    _copy_pkg_file("LEAFHUB.md",                _PKG_DIR   / "LEAFHUB.md")
+    _copy_pkg_file("setup_template.sh",         _PKG_DIR   / "setup_template.sh")
+    _copy_pkg_file("INSTALLER-MAINTENANCE.md",  _PKG_DIR   / "INSTALLER-MAINTENANCE.md")
 
 
 def _distribute_integration_files(project_dir: Path) -> list[str]:
