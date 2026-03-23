@@ -144,7 +144,7 @@ if [[ ! -d "$LEAFHUB_DIR/.git" ]] && [[ ! -e "$LEAFHUB_DIR" ]]; then
 else
     if [[ ! -d "$LEAFHUB_DIR/.git" ]]; then
         info "Directory exists — initialising git..."
-        git init "$LEAFHUB_DIR" --quiet
+        git -C "$LEAFHUB_DIR" init --quiet
         git -C "$LEAFHUB_DIR" remote add origin "$REPO_URL" 2>/dev/null || true
     else
         info "Existing installation found — syncing to latest..."
