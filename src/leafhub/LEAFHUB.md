@@ -113,6 +113,78 @@ LeafHub supports both API-key-based and OAuth-based providers. The SDK handles b
 
 Application code does not need to distinguish between these — `get_config()` always returns a standard `bearer` auth mode with a valid access token, regardless of the underlying provider type.
 
+### OAuth / Codex integration notes
+
+If your project calls the OpenAI Codex endpoint (ChatGPT subscription), be aware of several differences from the standard OpenAI Chat Completions API. These are the issues most likely to cause silent failures.
+
+#### 1. `api_format` must be `openai-responses`, not `openai-completions`
+
+The Codex endpoint uses the [Responses API](https://platform.openai.com/docs/api-reference/responses), which is a different protocol from Chat Completions. When `leafhub provider login` creates the provider, `api_format` is set to `openai-responses` automatically. If you see `404` errors or the URL contains `.../codex/responses/chat/completions`, the provider was created with the wrong format. Fix it:
+
+```bash
+leafhub provider show codex          # check api_format
+# If it shows openai-completions, re-create:
+leafhub provider delete codex
+leafhub provider login --name codex
+```
+
+#### 2. Codex endpoint protocol differs from Chat Completions
+
+The Responses API requires a different payload shape. If your code builds API requests manually (instead of using `get_config()` + a standard HTTP client), you must handle this:
+
+| Field | Chat Completions | Codex / Responses API |
+|-------|------------------|-----------------------|
+| Messages | `messages: [{role, content}]` | `input: [{role, content}]` |
+| System prompt | `messages[0].role = "system"` | `instructions: "..."` (required, top-level string) |
+| Streaming | `stream: true` (optional) | `stream: true` (required) |
+| Storage | not applicable | `store: false` (required) |
+| Temperature | `temperature: 0.7` | **not supported** — omit |
+| Max tokens | `max_tokens: N` | **not supported** — omit |
+| Response format | `choices[0].message.content` | SSE `response.output_text.delta` events, or `output[].content[].text` (non-streaming fallback) |
+
+Use `cfg.api_format` from `get_config()` to decide which payload shape to build.
+
+#### 3. `auth_mode` is always `bearer` at the wire level
+
+The SDK's `get_config()` translates `openai-oauth` → `bearer` before returning. Your code should **never** see `openai-oauth` as an auth mode. If you do, you are reading the raw provider record from the DB instead of going through `get_config()`. The access token is a standard Bearer token — set `Authorization: Bearer <api_key>` like any other OpenAI call.
+
+#### 4. Credentials must be refreshed before every request
+
+OAuth access tokens expire after ~1 hour. If your project caches credentials at module load time (e.g. reading env vars into module-level constants), those values will go stale during long-running sessions. The recommended pattern:
+
+```python
+# Bad — frozen at import time, stale after token refresh:
+API_KEY = os.getenv("REWRITE_API_KEY")
+
+# Good — read dynamically on each request:
+api_key = os.getenv("REWRITE_API_KEY") or CACHED_FALLBACK
+```
+
+If your project uses LeafHub's `resolve_credentials()` → `os.environ` injection pattern, call `resolve_credentials()` before every request so the env vars are updated with fresh tokens.
+
+#### 5. `leafhub provider list --json` for programmatic label parsing
+
+When auto-binding in setup scripts or CLI tools, always use `--json` to get provider labels:
+
+```python
+result = subprocess.run(["leafhub", "provider", "list", "--json"],
+                        capture_output=True, text=True)
+providers = json.loads(result.stdout)
+label = providers[0].get("label") if providers else None
+```
+
+Text-mode output may truncate or pad labels. Splitting on whitespace only gets the first word, which breaks multi-word labels like `"OpenAI Codex"`.
+
+#### 6. Editable install (`pip install -e`) path can go stale
+
+If the LeafHub source directory is moved or renamed after `pip install -e .`, the `.pth` file in `site-packages` will point to the old path. `open_sdk()` will raise `ImportError` and credential resolution will silently fail. Fix:
+
+```bash
+pip install -e /path/to/Leafhub    # re-install with correct path
+```
+
+This is not OAuth-specific, but OAuth providers surface it first because they require the full SDK (not just the distributed `probe.py`).
+
 ### Minimal pattern (detect → open_sdk → get_key)
 
 ```python
