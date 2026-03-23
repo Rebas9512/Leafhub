@@ -137,18 +137,24 @@ command -v git >/dev/null 2>&1 || fail "git is required but not found."
 # ── Step 3: Clone / update ────────────────────────────────────────────────────
 section "Installing LeafHub"
 
-if [[ -d "$LEAFHUB_DIR/.git" ]]; then
-    info "Existing installation found — syncing to latest..."
-    git -C "$LEAFHUB_DIR" fetch origin --quiet
-    branch="$(git -C "$LEAFHUB_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')"
-    [[ -z "$branch" ]] && branch="main"
-    git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet
-    ok "Updated to latest ($branch)."
-else
-    [[ -e "$LEAFHUB_DIR" ]] && { info "Removing stale directory $LEAFHUB_DIR ..."; rm -rf "$LEAFHUB_DIR"; }
+if [[ ! -d "$LEAFHUB_DIR/.git" ]] && [[ ! -e "$LEAFHUB_DIR" ]]; then
     info "Cloning into $LEAFHUB_DIR ..."
     git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
     ok "Cloned."
+else
+    if [[ ! -d "$LEAFHUB_DIR/.git" ]]; then
+        info "Directory exists — initialising git..."
+        git init "$LEAFHUB_DIR" --quiet
+        git -C "$LEAFHUB_DIR" remote add origin "$REPO_URL" 2>/dev/null || true
+    else
+        info "Existing installation found — syncing to latest..."
+    fi
+    git -C "$LEAFHUB_DIR" fetch origin --depth=1 --quiet
+    branch="$(git -C "$LEAFHUB_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')"
+    [[ -z "$branch" ]] && branch="main"
+    git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet
+    git -C "$LEAFHUB_DIR" clean -fdx --quiet 2>/dev/null || true
+    ok "Synced to latest ($branch)."
 fi
 
 # ── Step 4: Virtual environment + install ─────────────────────────────────────
