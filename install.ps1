@@ -1,5 +1,5 @@
-# ──────────────────────────────────────────────────────────────────────────────
-#  LeafHub — Windows One-liner Installer
+# ------------------------------------------------------------------------------
+#  LeafHub -- Windows One-liner Installer
 #
 #  irm https://raw.githubusercontent.com/Rebas9512/Leafhub/main/install.ps1 | iex
 #
@@ -11,7 +11,7 @@
 #  Environment variables:
 #    LEAFHUB_DIR          Override the install directory
 #    LEAFHUB_REPO_URL     Override the git clone URL
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 param(
     [string]$InstallDir = ""
 )
@@ -19,7 +19,7 @@ param(
 $ErrorActionPreference = "Stop"
 $DefaultInstallDir = Join-Path $env:USERPROFILE "leafhub"
 
-# ANSI colours — works on PowerShell 5.1+ and Windows Terminal
+# ANSI colours -- works on PowerShell 5.1+ and Windows Terminal
 $ESC    = [char]0x1b
 $GREEN  = "${ESC}[38;2;0;229;180m"
 $YELLOW = "${ESC}[38;2;255;176;32m"
@@ -28,10 +28,10 @@ $MUTED  = "${ESC}[38;2;110;120;148m"
 $BOLD   = "${ESC}[1m"
 $NC     = "${ESC}[0m"
 
-function Write-Ok($msg)      { Microsoft.PowerShell.Utility\Write-Host "${GREEN}√${NC}  $msg" }
-function Write-Info($msg)    { Microsoft.PowerShell.Utility\Write-Host "${MUTED}·${NC}  $msg" }
+function Write-Ok($msg)      { Microsoft.PowerShell.Utility\Write-Host "${GREEN}+${NC}  $msg" }
+function Write-Info($msg)    { Microsoft.PowerShell.Utility\Write-Host "${MUTED}.${NC}  $msg" }
 function Write-Warn($msg)    { Microsoft.PowerShell.Utility\Write-Host "${YELLOW}!${NC}  $msg" }
-function Write-Section($msg) { Microsoft.PowerShell.Utility\Write-Host ""; Microsoft.PowerShell.Utility\Write-Host "${BOLD}── $msg ──${NC}" }
+function Write-Section($msg) { Microsoft.PowerShell.Utility\Write-Host ""; Microsoft.PowerShell.Utility\Write-Host "${BOLD}-- $msg --${NC}" }
 function Write-Fail($msg)    { Microsoft.PowerShell.Utility\Write-Host "${RED}x${NC}  $msg"; exit 1 }
 
 function Test-DirHasEntries([string]$Dir) {
@@ -39,7 +39,7 @@ function Test-DirHasEntries([string]$Dir) {
     return $null -ne (Get-ChildItem -Force -LiteralPath $Dir | Select-Object -First 1)
 }
 
-# ── Resolve install directory ─────────────────────────────────────────────────
+# -- Resolve install directory -------------------------------------------------
 if (-not $InstallDir) {
     if ($env:LEAFHUB_DIR) {
         $InstallDir = $env:LEAFHUB_DIR
@@ -73,13 +73,13 @@ $VenvPip    = Join-Path $VenvDir "Scripts\pip.exe"
 $LeafhubExe = Join-Path $VenvDir "Scripts\leafhub.exe"
 $ScriptsDir = Join-Path $VenvDir "Scripts"
 
-# ── Banner ────────────────────────────────────────────────────────────────────
+# -- Banner --------------------------------------------------------------------
 Microsoft.PowerShell.Utility\Write-Host ""
-Microsoft.PowerShell.Utility\Write-Host "${BOLD}  LeafHub — Installer${NC}"
+Microsoft.PowerShell.Utility\Write-Host "${BOLD}  LeafHub -- Installer${NC}"
 Microsoft.PowerShell.Utility\Write-Host "${MUTED}  Install path: $InstallDir${NC}"
 Microsoft.PowerShell.Utility\Write-Host ""
 
-# ── Execution policy ──────────────────────────────────────────────────────────
+# -- Execution policy ----------------------------------------------------------
 $policy = Get-ExecutionPolicy
 if ($policy -eq "Restricted" -or $policy -eq "AllSigned") {
     try {
@@ -90,7 +90,7 @@ if ($policy -eq "Restricted" -or $policy -eq "AllSigned") {
     }
 }
 
-# ── Python 3.11+ ──────────────────────────────────────────────────────────────
+# -- Python 3.11+ --------------------------------------------------------------
 Write-Section "Python"
 
 function Find-Python {
@@ -117,13 +117,13 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Fail "git is required.`n  Install: winget install Git.Git  or  https://git-scm.com"
 }
 
-# ── Clone / update ────────────────────────────────────────────────────────────
+# -- Clone / update ------------------------------------------------------------
 Write-Section "Installing LeafHub"
 
 $RepoUrl = if ($env:LEAFHUB_REPO_URL) { $env:LEAFHUB_REPO_URL } else { "https://github.com/Rebas9512/Leafhub.git" }
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
-    Write-Info "Existing installation found — updating..."
+    Write-Info "Existing installation found -- updating..."
     git -C $InstallDir pull --ff-only --quiet
     Write-Ok "Updated to latest."
 } else {
@@ -132,7 +132,7 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Ok "Cloned."
 }
 
-# ── Virtual environment + install ─────────────────────────────────────────────
+# -- Virtual environment + install ---------------------------------------------
 Write-Section "Virtual environment"
 
 if (-not (Test-Path $VenvPython)) {
@@ -140,7 +140,7 @@ if (-not (Test-Path $VenvPython)) {
     & $Python -m venv $VenvDir
     Write-Ok "Venv created."
 } else {
-    Write-Ok "Venv exists — reusing."
+    Write-Ok "Venv exists -- reusing."
 }
 
 Write-Info "Upgrading pip and setuptools ..."
@@ -150,7 +150,7 @@ Write-Info "Installing leafhub[manage] ..."
 & $VenvPip install -e "$InstallDir[manage]" --quiet
 Write-Ok "Package installed."
 
-# ── PATH ──────────────────────────────────────────────────────────────────────
+# -- PATH ----------------------------------------------------------------------
 Write-Section "PATH"
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -163,7 +163,7 @@ if ($userPath -notlike "*$ScriptsDir*") {
 $env:Path = "$ScriptsDir;$env:Path"
 Write-Ok "PATH updated."
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+# -- Done ----------------------------------------------------------------------
 Microsoft.PowerShell.Utility\Write-Host ""
 Microsoft.PowerShell.Utility\Write-Host "${BOLD}  LeafHub installed!${NC}"
 Microsoft.PowerShell.Utility\Write-Host ""
