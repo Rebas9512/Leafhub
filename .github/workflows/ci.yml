@@ -9,18 +9,16 @@ on:
 jobs:
   test:
     name: Test / ${{ matrix.os }} / Python ${{ matrix.python-version }}
-
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12"]
 
-    runs-on: ${{ matrix.os }}
-
     defaults:
       run:
-        shell: bash   # consistent shell across all three platforms
+        shell: bash
 
     steps:
       - uses: actions/checkout@v6.0.2
@@ -36,9 +34,6 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
         env:
-          # Suppress keychain dialogs / prompts in headless CI runners.
-          # Tests inject LEAFHUB_MASTER_KEY via fixtures so keyring is never
-          # actually called — this is a belt-and-suspenders guard.
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
 
   lint:
@@ -47,9 +42,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax check
+        run: find src -name '*.py' | xargs python -m py_compile
+
+      - name: Shell script syntax
+        run: |
+          for f in install.sh setup.sh register.sh; do
+            [ -f "$f" ] && bash -n "$f" && echo "$f: syntax OK"
+          done
+
       - name: PS1 ASCII enforcement
         run: |
-          for f in install.ps1; do
+          for f in install.ps1 setup.ps1; do
+            [ -f "$f" ] || continue
             if grep -Pq '[^\x00-\x7F]' "$f"; then
               echo "ERROR: $f contains non-ASCII characters"
               grep -Pn '[^\x00-\x7F]' "$f"
@@ -58,27 +67,24 @@ jobs:
             echo "$f: ASCII OK"
           done
 
-      - name: Shell script syntax
-        run: |
-          for f in install.sh setup.sh; do
-            [ -f "$f" ] && bash -n "$f" && echo "$f: syntax OK"
-          done
-
   ps1-syntax:
     name: PowerShell syntax check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - name: Validate install.ps1
+      - name: Validate PS1 files
         shell: pwsh
         run: |
-          $errors = $null
-          $null = [System.Management.Automation.Language.Parser]::ParseFile(
-            "$PWD/install.ps1", [ref]$null, [ref]$errors
-          )
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            exit 1
+          foreach ($file in @("install.ps1", "setup.ps1")) {
+            if (-not (Test-Path $file)) { continue }
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              "$PWD/$file", [ref]$null, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+            }
+            Write-Host "$file syntax OK"
           }
-          Write-Host "install.ps1 syntax OK"
