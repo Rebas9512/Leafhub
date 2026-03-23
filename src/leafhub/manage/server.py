@@ -51,8 +51,9 @@ async def lifespan(app):
     conn  = open_db(hub_arg)
     store = SyncStore(conn)
 
-    app.state.master_key = master_key
-    app.state.store      = store
+    app.state.master_key     = master_key
+    app.state.store          = store
+    app.state.oauth_sessions = {}   # session_id → {status, provider, error}
 
     log.info("LeafHub manage server ready — storage at %s", resolved)
     yield

@@ -15,8 +15,12 @@ Ref: ModelHub/admin/providers.py
 from __future__ import annotations
 
 import asyncio
+import http.server
 import logging
+import secrets
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from fastapi import APIRouter, HTTPException, Request
@@ -44,6 +48,7 @@ router = APIRouter()
 #                       (native /api/tags lives at the root, not under /v1)
 _PROBE_PATH: dict[str, str] = {
     "openai-completions": "/models",
+    "openai-responses":   "/models",
     "anthropic-messages": "/v1/models",
     "ollama":             "/models",
 }
@@ -189,17 +194,18 @@ def _hub_dir(request: Request):
 
 def _provider_dict(p) -> dict:
     return {
-        "id":               p.id,
-        "label":            p.label,
-        "provider_type":    p.provider_type,
-        "api_format":       p.api_format,
-        "base_url":         p.base_url,
-        "default_model":    p.default_model,
-        "available_models": p.available_models,
-        "auth_mode":        p.auth_mode,
-        "auth_header":      p.auth_header,
-        "extra_headers":    p.extra_headers,
-        "created_at":       p.created_at,
+        "id":                p.id,
+        "label":             p.label,
+        "provider_type":     p.provider_type,
+        "api_format":        p.api_format,
+        "base_url":          p.base_url,
+        "default_model":     p.default_model,
+        "available_models":  p.available_models,
+        "auth_mode":         p.auth_mode,
+        "auth_header":       p.auth_header,
+        "extra_headers":     p.extra_headers,
+        "oauth_account_id":  p.oauth_account_id,
+        "created_at":        p.created_at,
     }
 
 
@@ -376,3 +382,258 @@ async def delete_provider(request: Request, provider_id: str):
         encrypt_providers(key_store, master_key, hub_dir)
 
     await asyncio.to_thread(_remove_key)
+
+
+# ── OAuth 2.0 PKCE flow (OpenAI Codex subscription) ──────────────────────────
+#
+# Flow:
+#   1. POST /admin/providers/oauth/start  → {session_id, auth_url}
+#      Backend starts a temporary HTTP server on localhost:1455 to receive
+#      the OAuth callback; returns the authorization URL to the frontend.
+#   2. Frontend opens auth_url in a new browser tab.
+#      User signs in with their ChatGPT account.
+#   3. OpenAI redirects to localhost:1455/auth/callback with ?code=...
+#      Backend exchanges code for tokens and saves the provider.
+#   4. GET /admin/providers/oauth/status/{session_id}
+#      Frontend polls until status is "done" or "error".
+
+
+class OAuthStartRequest(BaseModel):
+    label:         str
+    default_model: str = "gpt-5.4"
+
+
+async def _run_oauth_background(
+    *,
+    app,
+    session_id: str,
+    state:      str,
+    verifier:   str,
+    label:      str,
+    default_model: str,
+    existing_id: str | None,
+) -> None:
+    """
+    Background asyncio task:
+      • Waits for the OAuth callback on localhost:1455
+      • Exchanges the code for tokens
+      • Creates (or re-authenticates) the provider
+      • Updates the session state so the poll endpoint can return the result
+    """
+    from leafhub.core.crypto import decrypt_providers, encrypt_providers
+    from leafhub.core.oauth import CODEX_BASE_URL, exchange_code, get_account_id
+
+    sessions   = app.state.oauth_sessions
+    store      = app.state.store
+    master_key = app.state.master_key
+    hub_dir    = app.state.hub_dir
+
+    _code:  list[str | None] = [None]
+    _error: list[str | None] = [None]
+    _done  = threading.Event()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            qs     = urllib.parse.parse_qs(parsed.query)
+
+            if parsed.path != "/auth/callback":
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            got_state = qs.get("state", [None])[0]
+            if got_state != state:
+                _error[0] = "State mismatch — possible CSRF attempt."
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h2>State mismatch. Return to LeafHub and try again.</h2>")
+                _done.set()
+                return
+
+            code = qs.get("code", [None])[0]
+            if not code:
+                _error[0] = "Missing authorization code in callback."
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h2>Missing code. Return to LeafHub and try again.</h2>")
+                _done.set()
+                return
+
+            _code[0] = code
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body style='font-family:sans-serif;padding:2rem'>"
+                b"<h2>Authentication complete.</h2>"
+                b"<p>You may close this tab and return to LeafHub.</p>"
+                b"</body></html>"
+            )
+            _done.set()
+
+        def log_message(self, *_):
+            pass
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", 1455), _Handler)
+    except OSError as exc:
+        sessions[session_id]["status"] = "error"
+        sessions[session_id]["error"]  = (
+            f"Cannot bind localhost:1455 for OAuth callback ({exc}). "
+            "Check that no other OAuth session is already in progress."
+        )
+        return
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        got_code = await asyncio.to_thread(_done.wait, 300)
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+    if _error[0]:
+        sessions[session_id]["status"] = "error"
+        sessions[session_id]["error"]  = _error[0]
+        return
+
+    if not got_code or not _code[0]:
+        sessions[session_id]["status"] = "error"
+        sessions[session_id]["error"]  = "OAuth timed out after 5 minutes."
+        return
+
+    try:
+        tokens     = await asyncio.to_thread(exchange_code, _code[0], verifier)
+        account_id = get_account_id(tokens["access_token"])
+
+        if existing_id:
+            provider = await asyncio.to_thread(
+                store.update_provider,
+                existing_id,
+                default_model=default_model,
+                oauth_account_id=account_id,
+            )
+        else:
+            provider = await asyncio.to_thread(
+                store.create_provider,
+                label=label,
+                provider_type="openai",
+                api_format="openai-responses",
+                base_url=CODEX_BASE_URL,
+                default_model=default_model,
+                available_models=[default_model],
+                auth_mode="openai-oauth",
+                oauth_account_id=account_id,
+            )
+
+        def _save():
+            key_store = decrypt_providers(master_key, hub_dir)
+            key_store[provider.id] = {
+                "api_key":      tokens["refresh_token"],
+                "access_token": tokens["access_token"],
+                "expires_ms":   tokens["expires_ms"],
+            }
+            encrypt_providers(key_store, master_key, hub_dir)
+
+        await asyncio.to_thread(_save)
+
+        sessions[session_id]["status"]   = "done"
+        sessions[session_id]["provider"] = _provider_dict(provider)
+
+    except Exception as exc:
+        log.exception("OAuth provider save failed for session %s", session_id)
+        sessions[session_id]["status"] = "error"
+        sessions[session_id]["error"]  = str(exc)
+
+
+@router.post("/providers/oauth/start", status_code=202)
+async def start_oauth_provider(request: Request, body: OAuthStartRequest):
+    """
+    Initiate the OpenAI Codex OAuth PKCE flow.
+
+    Returns ``{session_id, auth_url}``.  The caller should open ``auth_url``
+    in a browser tab and then poll ``/admin/providers/oauth/status/{session_id}``
+    until status is ``"done"`` or ``"error"``.
+    """
+    from leafhub.core.oauth import (
+        _CLIENT_ID, _AUTHORIZE_URL, _REDIRECT_URI, _SCOPE, _pkce_pair,
+    )
+
+    store = _store(request)
+
+    existing = await asyncio.to_thread(store.find_provider_by_label, body.label)
+    if existing and existing.auth_mode != "openai-oauth":
+        raise HTTPException(
+            409,
+            f"Provider '{body.label}' already exists with auth_mode='{existing.auth_mode}'. "
+            "Use a different label for the OAuth provider.",
+        )
+
+    verifier, challenge = _pkce_pair()
+    state      = secrets.token_hex(16)
+    session_id = secrets.token_hex(16)
+
+    params = {
+        "response_type":              "code",
+        "client_id":                  _CLIENT_ID,
+        "redirect_uri":               _REDIRECT_URI,
+        "scope":                      _SCOPE,
+        "code_challenge":             challenge,
+        "code_challenge_method":      "S256",
+        "state":                      state,
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow":  "true",
+    }
+    auth_url = _AUTHORIZE_URL + "?" + urllib.parse.urlencode(params)
+
+    sessions = request.app.state.oauth_sessions
+
+    # Guard: reject if another OAuth session is already in progress
+    # (only one callback server can bind port 1455 at a time).
+    for _sid, _sess in sessions.items():
+        if _sess.get("status") == "pending":
+            raise HTTPException(
+                409,
+                "Another OAuth session is already in progress. "
+                "Complete or cancel it before starting a new one.",
+            )
+
+    # Evict completed/errored sessions to prevent unbounded memory growth.
+    stale = [k for k, v in sessions.items() if v.get("status") in ("done", "error")]
+    for k in stale:
+        del sessions[k]
+
+    sessions[session_id] = {"status": "pending", "provider": None, "error": None}
+
+    asyncio.create_task(_run_oauth_background(
+        app=request.app,
+        session_id=session_id,
+        state=state,
+        verifier=verifier,
+        label=body.label,
+        default_model=body.default_model,
+        existing_id=existing.id if existing else None,
+    ))
+
+    return {"session_id": session_id, "auth_url": auth_url}
+
+
+@router.get("/providers/oauth/status/{session_id}")
+async def oauth_provider_status(request: Request, session_id: str):
+    """
+    Poll for the result of an OAuth flow started by ``/admin/providers/oauth/start``.
+
+    Returns ``{status, provider, error}`` where status is one of:
+      • ``"pending"`` — waiting for the user to complete sign-in
+      • ``"done"``    — provider created/updated; ``provider`` contains the data
+      • ``"error"``   — something went wrong; ``error`` contains the message
+    """
+    sessions = request.app.state.oauth_sessions
+    session  = sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "OAuth session not found or expired.")
+    return session

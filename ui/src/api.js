@@ -38,10 +38,12 @@ async function req(method, path, body) {
 // ── Providers ─────────────────────────────────────────────────────────────────
 
 export const providers = {
-  list:   ()       => req('GET',    '/admin/providers'),
-  create: (data)   => req('POST',   '/admin/providers', data),
-  update: (id, d)  => req('PUT',    `/admin/providers/${id}`, d),
-  delete: (id)     => req('DELETE', `/admin/providers/${id}`),
+  list:        ()       => req('GET',    '/admin/providers'),
+  create:      (data)   => req('POST',   '/admin/providers', data),
+  update:      (id, d)  => req('PUT',    `/admin/providers/${id}`, d),
+  delete:      (id)     => req('DELETE', `/admin/providers/${id}`),
+  oauthStart:  (data)   => req('POST',   '/admin/providers/oauth/start', data),
+  oauthStatus: (sid)    => req('GET',    `/admin/providers/oauth/status/${sid}`),
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────

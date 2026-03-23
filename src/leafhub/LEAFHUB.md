@@ -4,6 +4,7 @@ This directory (`leafhub_dist/`) is written into your project root the first tim
 
 | File | Purpose |
 |------|---------|
+| `__init__.py` | Package marker — re-exports `detect`, `register`, `ProbeResult` |
 | `register.sh` | Shell function for setup scripts (`leafhub_setup_project`) |
 | `probe.py` | Stdlib-only runtime detection (`detect()` → `open_sdk()`) |
 | `setup_template.sh` | Ready-to-use `setup.sh` starting point for new projects |
@@ -101,6 +102,17 @@ Install in your setup.sh venv step:
 
 ## Step 3 — Runtime credential resolution
 
+### Supported provider types
+
+LeafHub supports both API-key-based and OAuth-based providers. The SDK handles both transparently:
+
+| Provider type | Auth mode | How keys are stored |
+|---------------|-----------|---------------------|
+| OpenAI / Anthropic / Ollama | `bearer` / `x-api-key` / `none` | Static API key, AES-256-GCM encrypted |
+| OpenAI Codex (ChatGPT subscription) | `openai-oauth` | OAuth refresh token; access tokens auto-refreshed on every `get_config()` call |
+
+Application code does not need to distinguish between these — `get_config()` always returns a standard `bearer` auth mode with a valid access token, regardless of the underlying provider type.
+
 ### Minimal pattern (detect → open_sdk → get_key)
 
 ```python
@@ -121,7 +133,11 @@ def resolve_credentials(alias: str) -> dict | None:
     if result.ready:
         try:
             hub = result.open_sdk()
-            cfg = hub.get_config(alias)   # {api_key, base_url, model, auth_mode, ...}
+            cfg = hub.get_config(alias)
+            # cfg is a ProviderConfig with fields:
+            #   api_key, base_url, model, api_format, auth_mode, auth_header, extra_headers
+            # For OAuth providers, api_key is a fresh access token (auto-refreshed).
+            # auth_mode is always "bearer" at the wire level (even for openai-oauth providers).
             return {"source": "leafhub", **cfg}
         except Exception:
             pass
@@ -291,6 +307,15 @@ leafhub project show myapp
 # Bindings should list:
 #   rewrite  →  ProviderName
 ```
+
+### OAuth token expired / refresh failed
+
+If you use an OpenAI Codex OAuth provider and see authentication errors:
+```bash
+leafhub provider login --name codex   # re-authenticate via browser
+```
+
+OAuth access tokens expire after ~1 hour. The SDK refreshes them automatically, but if the refresh token itself is revoked (e.g. password change, session invalidation), you must re-authenticate.
 
 ### Stale token after vault reset
 

@@ -44,6 +44,14 @@ leafhub provider add
 
 Prompts for provider name, base URL, API key, and default model. Any OpenAI-compatible endpoint works (OpenAI, Anthropic, Groq, Ollama, etc.).
 
+**Or sign in with your ChatGPT subscription (no API key needed):**
+
+```bash
+leafhub provider login --name codex
+```
+
+Opens a browser for OpenAI OAuth — usage goes through your ChatGPT Plus/Pro quota, not API credits. Tokens auto-refresh on every SDK call.
+
 Or use the Web UI:
 
 ```bash
@@ -105,7 +113,8 @@ leafhub project bind my-app --alias rewrite --provider "Anthropic"
 
 | Command | What it does |
 |---------|-------------|
-| `leafhub provider add` | Register a new API provider |
+| `leafhub provider add` | Register a new API provider (API key) |
+| `leafhub provider login --name <label>` | Add an OpenAI Codex OAuth provider (ChatGPT subscription) |
 | `leafhub provider list` | List configured providers |
 | `leafhub register <name> --path <dir> --alias <alias>` | Link a project directory |
 | `leafhub project show <name>` | Show project status and bindings |
@@ -147,6 +156,17 @@ Manage UI / CLI                  LeafHub                    Your Project
 ```
 
 Keys are AES-256-GCM encrypted on disk. The master key lives in the system keychain when available, otherwise in `~/.leafhub/.masterkey`.
+
+### Supported providers
+
+| API format | Auth mode | Examples |
+|------------|-----------|----------|
+| `openai-completions` | `bearer` | OpenAI, Groq, vLLM, any OpenAI-compatible |
+| `openai-responses` | `bearer` / `openai-oauth` | OpenAI Responses API, ChatGPT Codex endpoint |
+| `anthropic-messages` | `x-api-key` | Anthropic, MiniMax (Anthropic-compatible) |
+| `ollama` | `none` | Local Ollama instance |
+
+OAuth providers (`openai-oauth`) store a refresh token instead of a static API key. The SDK transparently refreshes access tokens on every call — application code sees a standard Bearer token.
 
 ### What gets installed
 
@@ -246,6 +266,7 @@ For the complete reference — Python runtime templates, CLI setup command patte
 | `db.py` | SQLite connection, schema migrations, WAL mode. |
 | `crypto.py` | AES-256-GCM encryption. PBKDF2-SHA256 key derivation (600,000 iterations). |
 | `store.py` | CRUD operations for providers, projects, tokens, and alias bindings. |
+| `oauth.py` | OpenAI Codex OAuth 2.0 Authorization Code + PKCE flow. Token exchange and refresh. |
 
 ### `src/leafhub/manage/` (optional — `pip install 'leafhub[manage]'`)
 
@@ -253,5 +274,5 @@ For the complete reference — Python runtime templates, CLI setup command patte
 |------|----------------|
 | `server.py` | FastAPI app. Serves the compiled Vue UI from `ui/dist/`. |
 | `auth.py` | Admin token middleware with per-IP rate limiting. |
-| `providers.py` | Provider CRUD. Connectivity probe on create. |
+| `providers.py` | Provider CRUD. Connectivity probe on create. OAuth PKCE flow endpoints. |
 | `projects.py` | Project CRUD. Token lifecycle, `.leafhub` distribution, `leafhub_dist/` module distribution (`register.sh`, `probe.py`, `LEAFHUB.md`, `setup_template.sh`), CLI auto-registration, full cleanup on delete. |

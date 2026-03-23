@@ -187,11 +187,15 @@ class LeafHub:
 
         key_store = self._load_key_store()
         entry     = key_store.get(binding.provider_id, {})
-        api_key   = entry.get("api_key") or ""
+
+        if provider.auth_mode == "openai-oauth":
+            api_key = self._resolve_oauth_token(binding.provider_id, entry)
+        else:
+            api_key = entry.get("api_key") or ""
 
         # auth_mode="none" means no API key is required (e.g. local Ollama).
         # Only raise when a key is genuinely expected but absent.
-        if not api_key and provider.auth_mode != "none":
+        if not api_key and provider.auth_mode not in ("none", "openai-oauth"):
             raise DecryptionError(
                 f"No API key found for provider '{provider.label}' "
                 f"(id={binding.provider_id}). "
@@ -199,12 +203,21 @@ class LeafHub:
             )
 
         model = binding.model_override or provider.default_model
+
+        # openai-oauth is an internal LeafHub implementation detail: the access
+        # token has already been resolved above and behaves as a standard Bearer
+        # token at the wire level.  Expose "bearer" so callers don't need special
+        # handling for this auth mode.
+        effective_auth_mode = (
+            "bearer" if provider.auth_mode == "openai-oauth" else provider.auth_mode
+        )
+
         return ProviderConfig(
             api_key=api_key,
             base_url=provider.base_url,
             model=model,
             api_format=provider.api_format,
-            auth_mode=provider.auth_mode,
+            auth_mode=effective_auth_mode,
             auth_header=provider.auth_header,
             extra_headers=provider.extra_headers,
         )
@@ -275,6 +288,66 @@ class LeafHub:
         self._conn.close()
 
     # ── Internal ──────────────────────────────────────────────────────────
+
+    def _resolve_oauth_token(self, provider_id: str, entry: dict) -> str:
+        """
+        Return a valid access_token for an openai-oauth provider.
+
+        If the cached access_token is still fresh, return it directly.
+        Otherwise exchange the stored refresh_token for a new pair and
+        persist the update to providers.enc.
+
+        Raises:
+            DecryptionError: no refresh_token found (provider needs re-login).
+        """
+        from .core.oauth import is_token_fresh, refresh_access_token
+        from .core.crypto import load_master_key, encrypt_providers
+
+        access_token = entry.get("access_token", "")
+        expires_ms   = entry.get("expires_ms", 0)
+        refresh_tok  = entry.get("api_key", "")  # refresh_token stored as api_key
+
+        if access_token and is_token_fresh(expires_ms):
+            return access_token
+
+        if not refresh_tok:
+            raise DecryptionError(
+                "No OAuth refresh token found. "
+                "Re-authenticate with: leafhub provider login --name <name>"
+            )
+
+        log.debug("OAuth access token expired — refreshing for provider %s", provider_id)
+        try:
+            new_tokens = refresh_access_token(refresh_tok)
+        except Exception as exc:
+            raise DecryptionError(
+                f"OAuth token refresh failed: {exc}. "
+                "Re-authenticate with: leafhub provider login --name <name>"
+            ) from exc
+
+        # Update in-memory cache and persist to disk atomically.
+        if self._key_cache is None:
+            raise DecryptionError(
+                "Key cache not loaded — cannot persist refreshed tokens."
+            )
+        self._key_cache[provider_id] = {
+            "api_key":      new_tokens["refresh_token"],
+            "access_token": new_tokens["access_token"],
+            "expires_ms":   new_tokens["expires_ms"],
+        }
+        try:
+            master_key = load_master_key(self._hub_dir)
+            encrypt_providers(self._key_cache, master_key, self._hub_dir)
+        except Exception as exc:
+            # Persist failure is serious: if the OAuth server rotated the
+            # refresh_token, the old one on disk is now revoked.  Re-raise
+            # so the caller knows the token state may be inconsistent.
+            raise DecryptionError(
+                f"OAuth token refreshed but failed to persist to disk: {exc}. "
+                "Re-authenticate with: leafhub provider login --name <name>"
+            ) from exc
+
+        return new_tokens["access_token"]
 
     def _load_key_store(self) -> dict:
         """

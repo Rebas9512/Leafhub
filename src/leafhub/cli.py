@@ -188,13 +188,101 @@ def cmd_provider_show(args: argparse.Namespace) -> None:
     if p.available_models:
         print(f"  Models        : {', '.join(p.available_models)}")
     print(f"  Auth Mode     : {p.auth_mode}")
-    if p.auth_header:
-        print(f"  Auth Header   : {p.auth_header}")
-    if p.extra_headers:
-        for k, v in p.extra_headers.items():
-            print(f"  Extra Header  : {k}: {v}")
+    if p.auth_mode == "openai-oauth":
+        who = p.oauth_account_id or "(unknown)"
+        print(f"  OAuth Account : {who}")
+        print(f"  Tokens        : (encrypted — re-authenticate with 'leafhub provider login')")
+    else:
+        if p.auth_header:
+            print(f"  Auth Header   : {p.auth_header}")
+        if p.extra_headers:
+            for k, v in p.extra_headers.items():
+                print(f"  Extra Header  : {k}: {v}")
+        print(f"  API Key       : (encrypted — use 'leafhub provider add' to replace)")
     print(f"  Created       : {p.created_at}")
-    print(f"  API Key       : (encrypted — use 'leafhub provider add' to replace)\n")
+    print()
+
+
+def cmd_provider_login(args: argparse.Namespace) -> None:
+    """
+    Add (or re-authenticate) an OpenAI Codex OAuth provider.
+
+    Runs the Authorization Code + PKCE browser flow against OpenAI,
+    stores the refresh_token encrypted in providers.enc, and registers
+    the provider with auth_mode="openai-oauth".
+
+    Usage:
+        leafhub provider login --name codex
+        leafhub provider login --name codex --model gpt-5.1-codex-mini
+    """
+    from .core.oauth import run_pkce_flow, CODEX_BASE_URL, CODEX_DEFAULT_MODEL
+    from .core.crypto import load_master_key, encrypt_providers, decrypt_providers
+
+    name  = _require_arg(args.name, "name")
+    model = args.default_model or CODEX_DEFAULT_MODEL
+
+    print(f"\nLogging in to OpenAI Codex OAuth (provider: '{name}')...")
+    print("Usage will be billed against your ChatGPT Plus/Pro subscription quota.\n")
+
+    try:
+        tokens, account_id = run_pkce_flow()
+    except RuntimeError as exc:
+        _die(str(exc))
+
+    store, hub_dir = _open_store()
+
+    existing = store.find_provider_by_label(name)
+    if existing is not None:
+        # Re-authenticate: update account_id and refresh the stored tokens.
+        if existing.auth_mode != "openai-oauth":
+            store.close()
+            _die(
+                f"Provider '{name}' exists with auth_mode='{existing.auth_mode}'. "
+                "Use a different --name for the OAuth provider."
+            )
+        store.update_provider(
+            existing.id,
+            default_model=model,
+            oauth_account_id=account_id,
+        )
+        provider_id = existing.id
+        action = "re-authenticated"
+    else:
+        provider = store.create_provider(
+            label=name,
+            provider_type="openai",
+            api_format="openai-responses",
+            base_url=CODEX_BASE_URL,
+            default_model=model,
+            available_models=[model],
+            auth_mode="openai-oauth",
+            oauth_account_id=account_id,
+        )
+        provider_id = provider.id
+        action = "added"
+
+    # Persist tokens (refresh_token as api_key, access_token + expires cached).
+    try:
+        master_key = load_master_key(hub_dir)
+        key_store  = decrypt_providers(master_key, hub_dir)
+        key_store[provider_id] = {
+            "api_key":      tokens["refresh_token"],
+            "access_token": tokens["access_token"],
+            "expires_ms":   tokens["expires_ms"],
+        }
+        encrypt_providers(key_store, master_key, hub_dir)
+    except Exception as exc:
+        if action == "added":
+            store.delete_provider(provider_id)
+        store.close()
+        _die(f"Failed to save OAuth tokens — {action} rolled back: {exc}")
+
+    store.close()
+    who = f" (account: {account_id})" if account_id else ""
+    print(f"✓ Provider '{name}' {action}{who}")
+    print(f"  Base URL : {CODEX_BASE_URL}")
+    print(f"  Model    : {model}")
+    print(f"  Auth     : openai-oauth (tokens auto-refresh via stored refresh_token)\n")
 
 
 def cmd_provider_delete(args: argparse.Namespace) -> None:
@@ -827,6 +915,7 @@ def cmd_manage(args: argparse.Namespace) -> None:
 def _default_base_url(api_format: str) -> str:
     return {
         "openai-completions":  "https://api.openai.com/v1",
+        "openai-responses":    "https://api.openai.com/v1",
         "anthropic-messages":  "https://api.anthropic.com",
         "ollama":              "http://localhost:11434",
     }.get(api_format, "")
@@ -835,6 +924,7 @@ def _default_base_url(api_format: str) -> str:
 def _default_model(api_format: str) -> str:
     return {
         "openai-completions":  "gpt-4o",
+        "openai-responses":    "gpt-5.4",
         "anthropic-messages":  "claude-3-5-sonnet-20241022",
         "ollama":              "llama3",
     }.get(api_format, "")
@@ -1374,6 +1464,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_del = p_prov_sub.add_parser("delete", help="Delete a provider")
     p_del.add_argument("--name", required=True, help="Provider label")
     p_del.set_defaults(func=cmd_provider_delete)
+
+    # provider login (OpenAI Codex OAuth)
+    p_login = p_prov_sub.add_parser(
+        "login",
+        help="Add an OpenAI Codex OAuth provider (uses ChatGPT subscription quota)",
+        description=(
+            "Authenticate with your ChatGPT account via OAuth 2.0 + PKCE.\n"
+            "Usage is billed against your ChatGPT Plus/Pro subscription,\n"
+            "not your OpenAI Platform API credits.\n\n"
+            "A browser window will open for sign-in.\n"
+            "For headless/SSH environments, copy the URL and open it locally."
+        ),
+    )
+    p_login.add_argument("--name", required=True,
+                         help="Display label for this provider (e.g. 'codex')")
+    p_login.add_argument("--default-model", dest="default_model",
+                         default=None,
+                         help="Default model (default: gpt-5.4)")
+    p_login.set_defaults(func=cmd_provider_login)
 
     # ── project ───────────────────────────────────────────────────────────────
     p_proj = sub.add_parser("project", help="Manage projects")

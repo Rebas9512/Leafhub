@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS providers (
     auth_mode        TEXT NOT NULL DEFAULT 'bearer',
     auth_header      TEXT,
     extra_headers    TEXT,
+    oauth_account_id TEXT,
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -67,9 +68,10 @@ CREATE TABLE IF NOT EXISTS model_bindings (
 
 # Columns added after initial schema — applied to existing databases on open.
 _PROVIDER_MIGRATIONS: list[tuple[str, str]] = [
-    ("auth_mode",     "TEXT NOT NULL DEFAULT 'bearer'"),
-    ("auth_header",   "TEXT"),
-    ("extra_headers", "TEXT"),
+    ("auth_mode",        "TEXT NOT NULL DEFAULT 'bearer'"),
+    ("auth_header",      "TEXT"),
+    ("extra_headers",    "TEXT"),
+    ("oauth_account_id", "TEXT"),
 ]
 
 _PROJECT_MIGRATIONS: list[tuple[str, str]] = [

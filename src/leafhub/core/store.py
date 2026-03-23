@@ -28,19 +28,22 @@ _TOKEN_RAND_BYTES = 16   # → 32 hex chars; full token = "lh-proj-" + 32 = 40 c
 
 SUPPORTED_API_FORMATS = frozenset({
     "openai-completions",
+    "openai-responses",   # OpenAI Responses API (used by ChatGPT Codex OAuth endpoint)
     "anthropic-messages",
     "ollama",
 })
 
 SUPPORTED_AUTH_MODES = frozenset({
-    "bearer",      # Authorization: Bearer <api_key>  (OpenAI, Ollama, most providers)
-    "x-api-key",   # x-api-key: <api_key>             (Anthropic)
-    "none",        # no auth header                   (local Ollama without auth)
+    "bearer",        # Authorization: Bearer <api_key>  (OpenAI, Ollama, most providers)
+    "x-api-key",     # x-api-key: <api_key>             (Anthropic)
+    "none",          # no auth header                   (local Ollama without auth)
+    "openai-oauth",  # ChatGPT OAuth token (auto-refreshed via refresh_token)
 })
 
 # Inferred auth_mode when none is specified, keyed by api_format.
 DEFAULT_AUTH_MODE: dict[str, str] = {
     "openai-completions": "bearer",
+    "openai-responses":   "bearer",
     "anthropic-messages": "x-api-key",
     "ollama":             "none",
 }
@@ -68,6 +71,9 @@ class Provider:
     auth_mode:        str                = "bearer"
     auth_header:      str | None         = None
     extra_headers:    dict[str, str]     = field(default_factory=dict)
+    # Populated only for auth_mode="openai-oauth" — the ChatGPT account ID
+    # extracted from the JWT after login.  Stored in plaintext (not sensitive).
+    oauth_account_id: str | None         = None
 
 
 @dataclass
@@ -128,10 +134,11 @@ class SyncStore:
         api_format:       str,
         base_url:         str,
         default_model:    str,
-        available_models: list[str] | None = None,
-        auth_mode:        str | None        = None,
-        auth_header:      str | None        = None,
-        extra_headers:    dict[str, str] | None = None,
+        available_models:  list[str] | None     = None,
+        auth_mode:         str | None           = None,
+        auth_header:       str | None           = None,
+        extra_headers:     dict[str, str] | None = None,
+        oauth_account_id:  str | None           = None,
     ) -> Provider:
         """
         Insert a provider row. API key is NOT stored here — it goes into
@@ -164,12 +171,12 @@ class SyncStore:
             INSERT INTO providers
                 (id, label, provider_type, api_format,
                  base_url, default_model, available_models,
-                 auth_mode, auth_header, extra_headers)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+                 auth_mode, auth_header, extra_headers, oauth_account_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (provider_id, label, provider_type, api_format,
              base_url, default_model, available_json,
-             resolved_auth_mode, auth_header, extra_headers_js),
+             resolved_auth_mode, auth_header, extra_headers_js, oauth_account_id),
         )
         self._conn.commit()
         log.info("Created provider '%s' (%s)", label, provider_id)
@@ -193,13 +200,14 @@ class SyncStore:
         self,
         provider_id: str,
         *,
-        label:            str | None            = None,
-        base_url:         str | None            = None,
-        default_model:    str | None            = None,
-        available_models: list[str] | None      = None,
-        auth_mode:        str | None            = None,
-        auth_header:      str | None            = None,
-        extra_headers:    dict[str, str] | None = None,
+        label:             str | None            = None,
+        base_url:          str | None            = None,
+        default_model:     str | None            = None,
+        available_models:  list[str] | None      = None,
+        auth_mode:         str | None            = None,
+        auth_header:       str | None            = None,
+        extra_headers:     dict[str, str] | None = None,
+        oauth_account_id:  str | None            = None,
     ) -> Provider:
         """
         Update provider metadata fields.  Pass only the fields to change.
@@ -229,7 +237,9 @@ class SyncStore:
         if auth_header is not None:
             sets.append("auth_header = ?");      vals.append(auth_header)
         if extra_headers is not None:
-            sets.append("extra_headers = ?");    vals.append(json.dumps(extra_headers))
+            sets.append("extra_headers = ?");       vals.append(json.dumps(extra_headers))
+        if oauth_account_id is not None:
+            sets.append("oauth_account_id = ?");    vals.append(oauth_account_id)
 
         if sets:
             self._conn.execute(
@@ -489,6 +499,10 @@ class SyncStore:
 # ── Module-level row converters (no self needed) ──────────────────────────────
 
 def _row_to_provider(row: sqlite3.Row) -> Provider:
+    try:
+        oauth_account_id = row["oauth_account_id"]
+    except (IndexError, KeyError):
+        oauth_account_id = None
     return Provider(
         id=row["id"],
         label=row["label"],
@@ -501,6 +515,7 @@ def _row_to_provider(row: sqlite3.Row) -> Provider:
         auth_mode=row["auth_mode"] or "bearer",
         auth_header=row["auth_header"],
         extra_headers=json.loads(row["extra_headers"] or "{}"),
+        oauth_account_id=oauth_account_id,
     )
 
 
