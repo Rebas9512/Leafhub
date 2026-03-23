@@ -153,7 +153,7 @@ else
     branch="$(git -C "$LEAFHUB_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')"
     [[ -z "$branch" ]] && branch="main"
     git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet
-    git -C "$LEAFHUB_DIR" clean -fdx --quiet 2>/dev/null || true
+    git -C "$LEAFHUB_DIR" clean -fd --quiet 2>/dev/null || true
     ok "Synced to latest ($branch)."
 fi
 
