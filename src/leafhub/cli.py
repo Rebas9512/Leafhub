@@ -1041,6 +1041,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
 def _remove_leafhub_self(install_dir: Path, hub_dir: Path) -> None:
     """Remove LeafHub's own CLI registration, PATH block, data dir, and source tree."""
+    import os
     import shutil as _shutil
 
     _MARKER   = "# >>> leafhub PATH >>>"
