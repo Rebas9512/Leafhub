@@ -168,15 +168,12 @@ Microsoft.PowerShell.Utility\Write-Host ""
 Microsoft.PowerShell.Utility\Write-Host "${BOLD}  LeafHub installed!${NC}"
 Microsoft.PowerShell.Utility\Write-Host ""
 
-if ($env:Path -like "*$ScriptsDir*") {
-    Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub --help${NC}              # verify install"
-    Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub provider add${NC}        # add an API key"
-    Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub project create${NC}      # create a project"
-    Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub manage${NC}              # start the Web UI"
-} else {
-    Microsoft.PowerShell.Utility\Write-Host "  Open a new terminal, then:"
-    Microsoft.PowerShell.Utility\Write-Host "    ${GREEN}leafhub --help${NC}"
-}
+Microsoft.PowerShell.Utility\Write-Host "  ${MUTED}If the command is not recognised, open a new terminal first.${NC}"
+Microsoft.PowerShell.Utility\Write-Host ""
+Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub --help${NC}              # verify install"
+Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub provider add${NC}        # add an API key"
+Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub project create${NC}      # create a project"
+Microsoft.PowerShell.Utility\Write-Host "  ${GREEN}leafhub manage${NC}              # start the Web UI"
 Microsoft.PowerShell.Utility\Write-Host ""
 Microsoft.PowerShell.Utility\Write-Host "  ${MUTED}Install dir:  $InstallDir${NC}"
 Microsoft.PowerShell.Utility\Write-Host "  ${MUTED}Data stored:  `$env:USERPROFILE\.leafhub\${NC}"
