@@ -83,6 +83,9 @@ if [[ -z "$LEAFHUB_DIR" ]]; then
     fi
 fi
 
+# If path is a file (not a directory), remove it
+if [[ -f "$LEAFHUB_DIR" ]]; then rm -f "$LEAFHUB_DIR"; fi
+
 # If the target exists and is non-empty but not a git repo, redirect into a
 # subdirectory so we don't clobber the user's existing files.
 if [[ ! -d "$LEAFHUB_DIR/.git" ]] && \
@@ -139,20 +142,24 @@ section "Installing LeafHub"
 
 if [[ ! -d "$LEAFHUB_DIR/.git" ]] && [[ ! -e "$LEAFHUB_DIR" ]]; then
     info "Cloning into $LEAFHUB_DIR ..."
-    git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet
+    git clone --depth=1 "$REPO_URL" "$LEAFHUB_DIR" --quiet \
+        || fail "git clone failed."
     ok "Cloned."
 else
     if [[ ! -d "$LEAFHUB_DIR/.git" ]]; then
         info "Directory exists — initialising git..."
-        git -C "$LEAFHUB_DIR" init --quiet
+        git -C "$LEAFHUB_DIR" init --quiet \
+            || fail "git init failed."
         git -C "$LEAFHUB_DIR" remote add origin "$REPO_URL" 2>/dev/null || true
     else
         info "Existing installation found — syncing to latest..."
     fi
-    git -C "$LEAFHUB_DIR" fetch origin --depth=1 --quiet
+    git -C "$LEAFHUB_DIR" fetch origin --depth=1 --quiet \
+        || fail "git fetch failed."
     branch="$(git -C "$LEAFHUB_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')"
     [[ -z "$branch" ]] && branch="main"
-    git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet
+    git -C "$LEAFHUB_DIR" reset --hard "origin/$branch" --quiet \
+        || fail "git reset failed."
     git -C "$LEAFHUB_DIR" clean -fd --quiet 2>/dev/null || true
     ok "Synced to latest ($branch)."
 fi
@@ -162,17 +169,20 @@ section "Virtual environment"
 
 if [[ ! -x "$VENV_PYTHON" ]]; then
     info "Creating .venv ..."
-    "$PYTHON" -m venv "$VENV_DIR"
+    "$PYTHON" -m venv "$VENV_DIR" \
+        || fail "Failed to create virtual environment."
     ok "Venv created."
 else
     ok "Venv exists — reusing."
 fi
 
 info "Upgrading pip and setuptools ..."
-"$VENV_PYTHON" -m pip install --upgrade pip setuptools --quiet
+"$VENV_PYTHON" -m pip install --upgrade pip setuptools --quiet \
+    || fail "pip upgrade failed."
 
 info "Installing leafhub[manage] ..."
-"$VENV_PIP" install -e "$LEAFHUB_DIR[manage]" --quiet
+"$VENV_PIP" install -e "$LEAFHUB_DIR[manage]" --quiet \
+    || fail "Package install failed."
 ok "Package installed."
 
 # ── Step 5: CLI registration ──────────────────────────────────────────────────
