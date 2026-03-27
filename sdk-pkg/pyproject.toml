@@ -1,0 +1,45 @@
+[build-system]
+requires      = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "leafhub-sdk"
+version         = "0.1.0"
+description     = "Lightweight SDK for LeafHub credential resolution — zero external dependencies"
+readme          = "README.md"
+requires-python = ">=3.10"
+license         = { file = "LICENSE" }
+authors         = [{ name = "Rebas9512", email = "weiyixin9512@gmail.com" }]
+keywords        = [
+    "llm", "api-key", "vault", "credentials",
+    "openai", "anthropic", "leafhub",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Zero external dependencies — pure stdlib.
+# tomllib is stdlib from 3.11+; tomli is vendored for 3.10 support.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Rebas9512/Leafhub"
+Source   = "https://github.com/Rebas9512/Leafhub"
+
+[tool.setuptools.packages.find]
+include = ["leafhub_sdk*"]
+
+[tool.setuptools.package-data]
+leafhub_sdk = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

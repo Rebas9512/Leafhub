@@ -3,11 +3,11 @@
 #  LeafHub — Project Registration Helper  (register.sh)
 #
 #  Provides leafhub_setup_project() for use in project setup scripts.
-#  Full protocol documentation: leafhub_dist/LEAFHUB.md
+#  Full documentation: https://github.com/Rebas9512/Leafhub
 #
-#  Source via (v2 standard — choose the first that succeeds):
+#  Source via (v3 standard — choose the first that succeeds):
 #    1. eval "$(leafhub shell-helper 2>/dev/null)"
-#    2. source "$SCRIPT_DIR/leafhub_dist/register.sh"
+#    2. eval "$($VENV_DIR/bin/leafhub shell-helper 2>/dev/null)"
 #    3. curl -fsSL https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh
 # ──────────────────────────────────────────────────────────────────────────────
 

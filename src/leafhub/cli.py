@@ -8,9 +8,10 @@ Usage:
     leafhub provider list
     leafhub provider show  --name <name>
     leafhub provider delete --name <name>
+    leafhub provider login --name <name>
 
-    leafhub project create  <name> [--path <dir>] [--no-probe]
-    leafhub project link    <name> --path <dir>   [--no-probe]
+    leafhub project create  <name> [--path <dir>]
+    leafhub project link    <name> --path <dir>
     leafhub project list
     leafhub project show    <name>
     leafhub project token   <name>
@@ -18,6 +19,11 @@ Usage:
                                    [--model <model>]
     leafhub project unbind  <name> --alias <alias>
     leafhub project delete  <name>
+
+    leafhub init    [<path>]           — generate setup.sh from leafhub.toml
+    leafhub doctor  [<path>]           — validate project integration
+    leafhub register .                 — register from leafhub.toml (manifest mode)
+    leafhub register <name> [--alias]  — register with explicit name (legacy mode)
 
     leafhub status
     leafhub manage [--port 8765]
@@ -29,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -998,7 +1005,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
     if linked:
         dirs_word = "directory" if len(linked) == 1 else "directories"
         print(
-            f"  Project artefacts (.leafhub, leafhub_dist/)"
+            f"  Project artefacts (.leafhub)"
             f" from {len(linked)} linked {dirs_word}"
         )
         print("  CLI registrations (symlinks + shell PATH entries) for those projects")
@@ -1214,8 +1221,9 @@ def cmd_register(args: argparse.Namespace) -> None:
     Full project registration flow: create/re-link project, guide provider
     setup if none exist, then auto-bind a provider to the project.
 
-    Designed to be called from install scripts via:
-        leafhub register <name> --path <dir> [--alias <alias>] [--headless]
+    Supports two modes:
+      1. Manifest mode:  leafhub register .   (reads leafhub.toml for name/aliases)
+      2. Legacy mode:    leafhub register <name> --path <dir> --alias <alias>
     """
     import json
     import subprocess
@@ -1225,11 +1233,35 @@ def cmd_register(args: argparse.Namespace) -> None:
         _is_integrated, _register_cli_symlinks, _write_dotfile,
     )
 
-    name     = args.project_name
+    raw_name = getattr(args, "project_name", None) or ""
     raw_path = getattr(args, "path", None)
-    path     = Path(_strip_path_quotes(raw_path)).resolve() if raw_path else Path.cwd()
-    alias    = getattr(args, "alias", None) or "default"
     headless = getattr(args, "headless", False)
+
+    # Detect manifest mode: "leafhub register ." or "leafhub register /abs/path"
+    # Trigger for ".", "./", paths with "/" or "\" separators, or absolute paths.
+    # Never for bare project names (e.g. "myapp") to avoid confusion.
+    manifest = None
+    _is_path = raw_name in (".", "./") or "/" in raw_name or "\\" in raw_name
+    if _is_path and (
+        Path(raw_name).resolve() / "leafhub.toml"
+    ).is_file():
+        manifest_dir = Path(raw_name).resolve()
+        manifest_file = manifest_dir / "leafhub.toml"
+        if manifest_file.is_file():
+            manifest = _load_manifest_for_cli(manifest_file)
+            raw_path = raw_path or str(manifest_dir)
+            raw_name = manifest["name"]
+            print(f"  Reading leafhub.toml: project '{raw_name}'")
+
+    name = raw_name or "default"
+    path = Path(_strip_path_quotes(raw_path)).resolve() if raw_path else Path.cwd()
+
+    # Determine aliases to bind
+    if manifest and manifest.get("bindings"):
+        aliases_to_bind = [b["alias"] for b in manifest["bindings"]]
+    else:
+        alias_arg = getattr(args, "alias", None) or "default"
+        aliases_to_bind = [alias_arg]
 
     if not path.is_dir():
         _die(f"Project directory not found: {path}")
@@ -1346,7 +1378,8 @@ def cmd_register(args: argparse.Namespace) -> None:
                 store_tmp.close()
         else:
             print(f"  Skipped. Run: leafhub provider add")
-            print(f"  Then bind:   leafhub project bind {name} --alias {alias} --provider <name>")
+            first_alias = aliases_to_bind[0] if aliases_to_bind else "default"
+            print(f"  Then bind:   leafhub project bind {name} --alias {first_alias} --provider <name>")
             return
 
         # Re-read providers after setup
@@ -1360,7 +1393,8 @@ def cmd_register(args: argparse.Namespace) -> None:
             print()
             print(f"  No providers configured. Bind later:")
             print(f"    leafhub provider add")
-            print(f"    leafhub project bind {name} --alias {alias} --provider <name>")
+            first_alias = aliases_to_bind[0] if aliases_to_bind else "default"
+            print(f"    leafhub project bind {name} --alias {first_alias} --provider <name>")
         return
 
     if len(providers) == 1:
@@ -1381,27 +1415,328 @@ def cmd_register(args: argparse.Namespace) -> None:
 
     store, _ = _open_store()
     try:
-        # Check if this alias is already bound and skip to avoid duplicate noise.
         existing_bindings = store.list_bindings(project_id)
-        already_bound = any(b.alias == alias for b in existing_bindings)
-        if already_bound:
-            print(f"✓ Alias '{alias}' already bound — skipping re-bind.")
-        else:
-            store.add_binding(
-                project_id=project_id,
-                alias=alias,
-                provider_id=chosen.id,
-            )
-            print(f"✓ Bound '{chosen.label}' → '{name}' (alias: {alias})")
-    except Exception as exc:
-        # Print visibly — a silent warning left users with no binding and no explanation.
-        print(
-            f"[!] Auto-bind failed ({type(exc).__name__}: {exc})\n"
-            f"    Fix: leafhub project bind {name} --alias {alias} --provider {chosen.label}",
-            file=sys.stderr,
-        )
+        existing_aliases = {b.alias for b in existing_bindings}
+
+        for alias in aliases_to_bind:
+            if alias in existing_aliases:
+                print(f"✓ Alias '{alias}' already bound — skipping re-bind.")
+            else:
+                try:
+                    store.add_binding(
+                        project_id=project_id,
+                        alias=alias,
+                        provider_id=chosen.id,
+                    )
+                    print(f"✓ Bound '{chosen.label}' → '{name}' (alias: {alias})")
+                except Exception as exc:
+                    print(
+                        f"[!] Auto-bind '{alias}' failed ({type(exc).__name__}: {exc})\n"
+                        f"    Fix: leafhub project bind {name} --alias {alias} --provider {chosen.label}",
+                        file=sys.stderr,
+                    )
     finally:
         store.close()
+
+
+# ── Init command ──────────────────────────────────────────────────────────────
+
+def cmd_init(args: argparse.Namespace) -> None:
+    """
+    Generate setup.sh / install.sh from a leafhub.toml manifest.
+
+    Reads the manifest to inject project-specific customizations (extra_deps,
+    post_register hooks, doctor_cmd) into the standard template, so the setup
+    script can be regenerated at any time without losing customizations.
+    """
+    raw_path = getattr(args, "path", None) or "."
+    target_dir = Path(_strip_path_quotes(raw_path)).resolve()
+
+    if not target_dir.is_dir():
+        _die(f"Directory not found: {target_dir}")
+
+    manifest_file = target_dir / "leafhub.toml"
+    if not manifest_file.is_file():
+        _die(
+            f"No leafhub.toml found in {target_dir}.\n"
+            "  Create one first. Minimal example:\n\n"
+            "    [project]\n"
+            '    name = "my-project"\n\n'
+            "    [[bindings]]\n"
+            '    alias = "llm"\n'
+            "    required = true\n"
+        )
+
+    # Parse the manifest using leafhub_sdk if available, else inline parser
+    manifest = _load_manifest_for_cli(manifest_file)
+
+    from .scaffold import generate_setup_sh, generate_install_sh
+
+    # Generate setup.sh
+    setup_content = generate_setup_sh(manifest)
+    setup_path = target_dir / "setup.sh"
+    setup_path.write_text(setup_content, encoding="utf-8")
+    setup_path.chmod(0o755)
+    print(f"✓ Generated {setup_path}")
+
+    # Generate install.sh
+    install_content = generate_install_sh(manifest)
+    install_path = target_dir / "install.sh"
+    install_path.write_text(install_content, encoding="utf-8")
+    install_path.chmod(0o755)
+    print(f"✓ Generated {install_path}")
+
+    print()
+    print(f"  Project: {manifest['name']}")
+    if manifest.get("bindings"):
+        aliases = [b["alias"] for b in manifest["bindings"]]
+        print(f"  Aliases: {', '.join(aliases)}")
+    if manifest.get("setup", {}).get("extra_deps"):
+        print(f"  Extra deps: {', '.join(manifest['setup']['extra_deps'])}")
+    if manifest.get("setup", {}).get("post_register"):
+        print(f"  Post-register: {', '.join(manifest['setup']['post_register'])}")
+    print()
+    print("  Next steps:")
+    print("    leafhub register .     # register and bind aliases")
+    print("    leafhub doctor .       # verify all bindings")
+
+
+# ── Doctor command ────────────────────────────────────────────────────────────
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """
+    Validate a project's LeafHub integration based on its leafhub.toml manifest.
+
+    Checks:
+      1. leafhub.toml exists and is valid
+      2. .leafhub token exists and is valid
+      3. All required aliases have provider bindings
+      4. Credentials resolve for each required alias
+      5. Custom doctor_cmd (if declared) passes
+    """
+    raw_path = getattr(args, "path", None) or "."
+    target_dir = Path(_strip_path_quotes(raw_path)).resolve()
+
+    if not target_dir.is_dir():
+        _die(f"Directory not found: {target_dir}")
+
+    passed = 0
+    failed = 0
+    warnings = 0
+
+    def _ok(msg: str) -> None:
+        nonlocal passed
+        passed += 1
+        print(f"  ✓ {msg}")
+
+    def _fail(msg: str) -> None:
+        nonlocal failed
+        failed += 1
+        print(f"  ✗ {msg}")
+
+    def _warn(msg: str) -> None:
+        nonlocal warnings
+        warnings += 1
+        print(f"  ! {msg}")
+
+    print(f"\nLeafHub Doctor — {target_dir}\n")
+
+    # 1. Check leafhub.toml
+    manifest_file = target_dir / "leafhub.toml"
+    if not manifest_file.is_file():
+        _fail("leafhub.toml not found")
+        print(f"\n  Result: {passed} passed, {failed} failed")
+        sys.exit(1)
+
+    try:
+        manifest = _load_manifest_for_cli(manifest_file)
+        _ok(f"leafhub.toml valid (project: {manifest['name']})")
+    except Exception as exc:
+        _fail(f"leafhub.toml invalid: {exc}")
+        print(f"\n  Result: {passed} passed, {failed} failed")
+        sys.exit(1)
+
+    # 2. Check .leafhub token
+    dotfile = target_dir / ".leafhub"
+    if dotfile.is_file():
+        import json
+        try:
+            data = json.loads(dotfile.read_text(encoding="utf-8"))
+            token = data.get("token", "") if isinstance(data, dict) else ""
+            if token:
+                _ok(f".leafhub token present (prefix: {token[:12]}...)")
+
+                # Validate token against vault
+                try:
+                    from .sdk import LeafHub
+                    hub = LeafHub(token=token)
+                    _ok("Token valid — project authenticated")
+
+                    # 3. Check bindings
+                    for b in manifest.get("bindings", []):
+                        alias = b["alias"]
+                        required = b.get("required", False)
+                        try:
+                            cfg = hub.get_config(alias)
+                            _ok(
+                                f"binding '{alias}' → {cfg.api_format} "
+                                f"(model: {cfg.model})"
+                                + (" [required]" if required else "")
+                            )
+                        except Exception as bind_exc:
+                            _name = type(bind_exc).__name__
+                            if required:
+                                _fail(
+                                    f"binding '{alias}' not resolved: {_name} "
+                                    f"[required]"
+                                )
+                            else:
+                                _warn(
+                                    f"binding '{alias}' not resolved: {_name} "
+                                    f"[optional]"
+                                )
+                except Exception as auth_exc:
+                    _fail(f"Token invalid: {type(auth_exc).__name__}: {auth_exc}")
+            else:
+                _fail(".leafhub exists but token is empty")
+        except (json.JSONDecodeError, OSError) as exc:
+            _fail(f".leafhub unreadable: {exc}")
+    else:
+        _fail(".leafhub not found (run: leafhub register .)")
+
+    # 4. Check env var fallbacks for each binding
+    import os
+    for b in manifest.get("bindings", []):
+        alias = b["alias"]
+        fallbacks = manifest.get("env_fallbacks", {}).get(alias, [])
+        if fallbacks:
+            found_var = next(
+                (v for v in fallbacks if os.environ.get(v)),
+                None,
+            )
+            if found_var:
+                _ok(f"env fallback for '{alias}': {found_var} is set")
+            else:
+                _warn(f"env fallback for '{alias}': none of {fallbacks} are set")
+
+    # 5. Check leafhub-sdk availability
+    try:
+        import leafhub_sdk  # type: ignore[import-untyped]
+        _ok(f"leafhub-sdk installed (v{leafhub_sdk.__version__})")
+    except ImportError:
+        _warn("leafhub-sdk not installed (pip install leafhub-sdk)")
+
+    # 6. Run custom doctor_cmd if declared
+    doctor_cmd = manifest.get("setup", {}).get("doctor_cmd")
+    if doctor_cmd:
+        import subprocess
+        print(f"\n  Running doctor_cmd: {doctor_cmd}")
+        result = subprocess.run(
+            doctor_cmd, shell=True, cwd=target_dir,
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            _ok(f"doctor_cmd passed")
+        else:
+            _fail(f"doctor_cmd failed (exit {result.returncode})")
+            if result.stderr.strip():
+                for line in result.stderr.strip().splitlines()[:5]:
+                    print(f"    {line}")
+
+    # Summary
+    print(f"\n  Result: {passed} passed, {failed} failed, {warnings} warnings")
+    if failed > 0:
+        sys.exit(1)
+
+
+# ── Manifest helper for CLI ──────────────────────────────────────────────────
+
+def _load_manifest_for_cli(manifest_file: Path) -> dict:
+    """
+    Load a leafhub.toml manifest and return a plain dict.
+
+    Tries leafhub_sdk first (uses tomllib), falls back to a minimal inline
+    parser so the CLI works even without leafhub-sdk installed.
+    """
+    try:
+        from leafhub_sdk.manifest import load_manifest
+        m = load_manifest(manifest_file)
+        return {
+            "name": m.name,
+            "python": m.python,
+            "bindings": [
+                {
+                    "alias": b.alias,
+                    "required": b.required,
+                    "env_prefix": b.env_prefix,
+                    "capabilities": b.capabilities,
+                }
+                for b in m.bindings
+            ],
+            "setup": {
+                "extra_deps": m.setup.extra_deps,
+                "post_register": m.setup.post_register,
+                "doctor_cmd": m.setup.doctor_cmd,
+            },
+            "env_fallbacks": m.env_fallbacks,
+        }
+    except ImportError:
+        pass
+
+    # Fallback: use tomllib / tomli directly
+    text = manifest_file.read_text(encoding="utf-8")
+    try:
+        import tomllib
+        raw = tomllib.loads(text)
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+            raw = tomllib.loads(text)
+        except ImportError:
+            _die(
+                "Cannot parse leafhub.toml: neither tomllib (Python 3.11+) "
+                "nor tomli is available.\n"
+                "  Install leafhub-sdk:  pip install leafhub-sdk\n"
+                "  Or tomli:             pip install tomli"
+            )
+            return {}  # unreachable
+
+    project = raw.get("project", {})
+    name = project.get("name")
+    if not name:
+        raise ValueError("leafhub.toml: [project].name is required")
+
+    bindings = []
+    for b in raw.get("bindings", []):
+        caps = b.get("capabilities", [])
+        if isinstance(caps, str):
+            caps = [caps]
+        bindings.append({
+            "alias": b.get("alias", ""),
+            "required": bool(b.get("required", False)),
+            "env_prefix": b.get("env_prefix"),
+            "capabilities": caps,
+        })
+
+    setup_raw = raw.get("setup", {})
+    env_fb = {}
+    for alias, vars_list in raw.get("env_fallbacks", {}).items():
+        if isinstance(vars_list, list):
+            env_fb[alias] = [str(v) for v in vars_list]
+        elif isinstance(vars_list, str):
+            env_fb[alias] = [vars_list]
+
+    return {
+        "name": name,
+        "python": project.get("python"),
+        "bindings": bindings,
+        "setup": {
+            "extra_deps": setup_raw.get("extra_deps", []),
+            "post_register": setup_raw.get("post_register", []),
+            "doctor_cmd": setup_raw.get("doctor_cmd"),
+        },
+        "env_fallbacks": env_fb,
+    }
 
 
 # ── Shell-helper command ────────────────────────────────────────────────────────
@@ -1409,15 +1744,14 @@ def cmd_register(args: argparse.Namespace) -> None:
 def cmd_shell_helper(args: argparse.Namespace) -> None:
     """Print register.sh content for eval in install scripts.
 
-    Usage in setup.sh (v2 standard, 2026-03-21):
+    Usage in setup.sh (v3 standard):
 
-        eval "$(leafhub shell-helper 2>/dev/null)" \\
-            || source "$SCRIPT_DIR/leafhub_dist/register.sh"
+        _lh_content="$(leafhub shell-helper 2>/dev/null)"
+        if [[ -n "$_lh_content" ]]; then eval "$_lh_content"; fi
 
     ``leafhub shell-helper`` outputs register.sh to stdout for the calling
-    shell to eval.  The local ``leafhub_dist/register.sh`` (distributed to
-    the project at registration time) is the offline fallback — it is sourced
-    directly when the leafhub binary is absent or not yet installed.
+    shell to eval.  The venv-installed leafhub binary is the offline fallback
+    when the system binary is not yet installed.
     """
     import importlib.resources as _pkg_res
 
@@ -1608,22 +1942,59 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_manage.set_defaults(func=cmd_manage)
 
+    # ── init ──────────────────────────────────────────────────────────────────
+    p_init = sub.add_parser(
+        "init",
+        help="Generate setup.sh / install.sh from a leafhub.toml manifest",
+        description=(
+            "Reads leafhub.toml in the target directory and generates\n"
+            "standardized setup.sh and install.sh scripts with project-specific\n"
+            "customizations (extra_deps, post_register hooks, doctor_cmd).\n\n"
+            "The generated scripts can be regenerated at any time — all\n"
+            "customizations live in leafhub.toml, not in the scripts."
+        ),
+    )
+    p_init.add_argument("path", nargs="?", default=".",
+                        help="Project directory containing leafhub.toml (default: .)")
+    p_init.set_defaults(func=cmd_init)
+
+    # ── doctor ────────────────────────────────────────────────────────────────
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Validate project integration against leafhub.toml",
+        description=(
+            "Checks that a project's LeafHub integration is healthy:\n\n"
+            "  1. leafhub.toml exists and is valid\n"
+            "  2. .leafhub token exists and authenticates\n"
+            "  3. All required aliases have provider bindings\n"
+            "  4. Environment variable fallbacks are configured\n"
+            "  5. Custom doctor_cmd (if declared) passes"
+        ),
+    )
+    p_doctor.add_argument("path", nargs="?", default=".",
+                          help="Project directory (default: .)")
+    p_doctor.set_defaults(func=cmd_doctor)
+
     # ── register ──────────────────────────────────────────────────────────────
     p_reg = sub.add_parser(
         "register",
         help="Register a project: create/re-link, guide provider setup, auto-bind",
         description=(
             "One-shot project registration for use in install scripts.\n\n"
+            "Two modes:\n"
+            "  Manifest:  leafhub register .          (reads leafhub.toml)\n"
+            "  Legacy:    leafhub register <name> --alias <alias>\n\n"
             "Creates the project if it does not exist, re-links if it does,\n"
             "guides provider setup when none are configured, then auto-binds\n"
-            "a provider to the project under the given alias."
+            "a provider to the project under the declared aliases."
         ),
     )
-    p_reg.add_argument("project_name", help="Project name")
+    p_reg.add_argument("project_name", nargs="?", default=".",
+                       help="Project name, or '.' to read from leafhub.toml (default: .)")
     p_reg.add_argument("--path", metavar="DIR",
                        help="Project directory (default: current directory)")
-    p_reg.add_argument("--alias", default="default",
-                       help="Binding alias to create (default: default)")
+    p_reg.add_argument("--alias", default=None,
+                       help="Binding alias (ignored in manifest mode)")
     p_reg.add_argument("--headless", action="store_true",
                        help="Non-interactive mode: skip all prompts, auto-select first provider")
     p_reg.set_defaults(func=cmd_register)

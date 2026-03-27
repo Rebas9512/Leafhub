@@ -64,42 +64,52 @@ Or use the Web UI:
 leafhub manage    # opens http://localhost:8765
 ```
 
-**2. Link a project directory**
+**2. Create a `leafhub.toml` manifest in your project root**
 
-```bash
-leafhub register my-app --path /path/to/my-app --alias rewrite
+```toml
+[project]
+name = "my-app"
+
+[[bindings]]
+alias = "rewrite"
+required = true
+env_prefix = "REWRITE"
+
+[env_fallbacks]
+rewrite = ["REWRITE_API_KEY", "OPENAI_API_KEY"]
 ```
 
-This writes a `.leafhub` dotfile into the project directory and binds the provider under the alias `rewrite`. Your application code calls `hub.get_key("rewrite")` to retrieve the key at runtime — no key in any config file.
-
-**3. Verify**
+**3. Register and bind**
 
 ```bash
-leafhub project show my-app
-# Should show:
-#   Bindings:
-#     rewrite  → ProviderName  (model: ...)
+leafhub register .           # reads leafhub.toml, creates project, binds aliases
+leafhub doctor .             # verify all bindings are healthy
 ```
 
 ---
 
 ## Using LeafHub in runtime code
 
-After linking a project, the SDK auto-detects the `.leafhub` dotfile. The recommended import pattern tries the installed pip package first, then falls back to the distributed copy:
+Install the lightweight SDK (`pip install leafhub-sdk`) and resolve credentials in one line:
 
 ```python
-try:
-    from leafhub.probe import detect      # pip package (preferred)
-except ImportError:
-    from leafhub_dist.probe import detect # distributed copy (fallback)
+from leafhub_sdk import resolve
 
-result = detect()
-hub = result.open_sdk()
-api_key = hub.get_key("rewrite")          # decrypts and returns the key
-cfg    = hub.get_config("rewrite")        # base_url, model, auth_mode, ...
+# Get credentials (api_key, base_url, model, api_format)
+cred = resolve("rewrite")
+
+# Or get a pre-built API client
+cred = resolve("rewrite", as_client=True)
+client = cred.client  # openai.OpenAI or anthropic.Anthropic
+
+# Or inject as environment variables (for startup-time injection)
+env = resolve("rewrite", as_env=True)
+os.environ.update(env)  # REWRITE_API_KEY, REWRITE_MODEL, etc.
 ```
 
-The `leafhub_dist/` directory is written into your project root at registration time — no network dependency at runtime. For the full runtime template including env-var fallback and startup injection, see `leafhub_dist/LEAFHUB.md` in any registered project.
+Resolution priority: LeafHub vault → `leafhub.toml` env_fallbacks → common env vars (`OPENAI_API_KEY`, etc.) → actionable error.
+
+The SDK reads `leafhub.toml` for alias, prefix, and fallback configuration — no hardcoded values in application code.
 
 ---
 
@@ -122,7 +132,10 @@ leafhub project bind my-app --alias rewrite --provider "Anthropic"
 | `leafhub provider add` | Register a new API provider (API key) |
 | `leafhub provider login --name <label>` | Add an OpenAI Codex OAuth provider (ChatGPT subscription) |
 | `leafhub provider list` | List configured providers |
-| `leafhub register <name> --path <dir> --alias <alias>` | Link a project directory |
+| `leafhub register .` | Register project from `leafhub.toml` (manifest mode) |
+| `leafhub register <name> --alias <alias>` | Register project with explicit name (legacy mode) |
+| `leafhub init .` | Generate `setup.sh` / `install.sh` from `leafhub.toml` |
+| `leafhub doctor .` | Validate project integration (token, bindings, env vars) |
 | `leafhub project show <name>` | Show project status and bindings |
 | `leafhub project bind <name> --alias <alias> --provider <name>` | Bind a provider alias |
 | `leafhub manage` | Start the Web UI at http://localhost:8765 |
@@ -137,7 +150,7 @@ leafhub project bind my-app --alias rewrite --provider "Anthropic"
 leafhub uninstall
 ```
 
-Interactive two-step removal: removes all project artefacts (`.leafhub`, `leafhub_dist/`, CLI symlinks), then removes LeafHub itself (`~/.leafhub/`, install directory, PATH entries).
+Interactive two-step removal: removes all project artefacts (`.leafhub`, CLI symlinks), then removes LeafHub itself (`~/.leafhub/`, install directory, PATH entries).
 
 ---
 
@@ -146,18 +159,19 @@ Interactive two-step removal: removes all project artefacts (`.leafhub`, `leafhu
 ```
 Manage UI / CLI                  LeafHub                    Your Project
       │                              │                            │
-      │  leafhub register my-app     │                            │
+      │  leafhub register .          │                            │
+      │  (reads leafhub.toml)        │                            │
       │────────────────────────────► │                            │
       │                              │  write .leafhub (chmod 600)│
       │                              │ ──────────────────────────►│
-      │                              │  distribute leafhub_dist/  │
-      │                              │ ──────────────────────────►│
+      │                              │  bind aliases from toml    │
       │                              │                            │
       │                              │     Next startup           │
       │                              │◄───────────────────────────│
-      │                              │  detect() → open_sdk()     │
+      │                              │  leafhub_sdk.resolve()     │
+      │                              │  → reads leafhub.toml      │
       │                              │  → reads .leafhub token    │
-      │                              │  → returns API key         │
+      │                              │  → decrypts API key        │
       │                              │ ──────────────────────────►│
 ```
 
@@ -187,70 +201,59 @@ OAuth providers (`openai-oauth`) store a refresh token instead of a static API k
 
 ## Project integration standard
 
-When you run `leafhub register` for the first time, LeafHub writes a `leafhub_dist/` directory into your project root containing everything needed to integrate:
+New projects integrate with LeafHub in three steps:
 
-| File | Purpose |
-|------|---------|
-| `register.sh` | Shell function (`leafhub_setup_project`) for setup scripts |
-| `probe.py` | Stdlib-only runtime detection — `detect()` → `open_sdk()` → `get_key()` |
-| `LEAFHUB.md` | **Full integration reference** — setup block, Python templates, troubleshooting |
-| `setup_template.sh` | Ready-to-use `setup.sh` starting point (copy → rename → change 2 lines) |
+**1. Create `leafhub.toml`** in your project root (commit to git):
 
-**The fastest way to integrate a new project:**
+```toml
+[project]
+name = "my-project"
+python = ">=3.10"
 
-```bash
-# After leafhub register writes leafhub_dist/ into your project:
-cp leafhub_dist/setup_template.sh setup.sh
-chmod +x setup.sh
-# Edit the two CUSTOMIZE lines at the top of setup.sh, then run it.
+[[bindings]]
+alias = "llm"
+required = true
+env_prefix = "LLM"
+capabilities = ["chat"]
+
+[setup]
+extra_deps = []                           # e.g. ["playwright install chromium"]
+post_register = []                        # e.g. ["python -m download_models"]
+doctor_cmd = "python check_env.py"        # optional health check
+
+[env_fallbacks]
+llm = ["LLM_API_KEY", "OPENAI_API_KEY"]   # env var fallback chain
 ```
 
-**Manual integration** — add this block to your existing `setup.sh` after the venv step:
+**2. Generate setup scripts and register:**
 
 ```bash
-# ── LeafHub integration ───────────────────────────────────────────────────────
-# Resolution order (stops at first success):
-#   1. leafhub shell-helper        — system PATH binary (fast, offline)
-#   2. $VENV_DIR/bin/leafhub       — pip-installed in venv (offline fallback)
-#   3. leafhub_dist/register.sh    — local distributed copy (offline fallback)
-#   4. GitHub curl                 — first-time bootstrap, network required
-_lh_content=""
-if _lh_content="$(leafhub shell-helper 2>/dev/null)" && [[ -n "$_lh_content" ]]; then
-    eval "$_lh_content"
-elif [[ -x "$VENV_DIR/bin/leafhub" ]] \
-    && _lh_content="$("$VENV_DIR/bin/leafhub" shell-helper 2>/dev/null)" \
-    && [[ -n "$_lh_content" ]]; then
-    eval "$_lh_content"
-elif [[ -f "$SCRIPT_DIR/leafhub_dist/register.sh" ]]; then
-    source "$SCRIPT_DIR/leafhub_dist/register.sh"
-else
-    _TMP_REG="$(mktemp)"
-    if ! curl -fsSL \
-            https://raw.githubusercontent.com/Rebas9512/Leafhub/main/register.sh \
-            -o "$_TMP_REG" 2>/dev/null; then
-        rm -f "$_TMP_REG"
-        fail "Could not fetch LeafHub installer."
-    fi
-    source "$_TMP_REG"
-    rm -f "$_TMP_REG"
-fi
-unset _lh_content
-
-leafhub_setup_project "my-project" "$SCRIPT_DIR" "my-alias" \
-    || fail "LeafHub registration failed."
+leafhub init .            # generates setup.sh + install.sh from leafhub.toml
+leafhub register .        # creates project, binds aliases from leafhub.toml
+leafhub doctor .          # validates token, bindings, env fallbacks
 ```
 
-Also declare `leafhub` as an optional pip dependency:
+**3. Use in code** (`pip install leafhub-sdk`):
+
+```python
+from leafhub_sdk import resolve
+
+cred = resolve("llm")         # reads leafhub.toml for alias + fallbacks
+api_key = cred.api_key         # decrypted from vault, or from env var
+```
+
+Also declare the SDK as a pip dependency:
 
 ```toml
 # pyproject.toml
 [project.optional-dependencies]
-leafhub = ["leafhub @ git+https://github.com/Rebas9512/Leafhub.git"]
+leafhub = [
+    "leafhub @ git+https://github.com/Rebas9512/Leafhub.git",
+    "leafhub-sdk @ git+https://github.com/Rebas9512/Leafhub.git#subdirectory=sdk-pkg",
+]
 ```
 
-**Alias consistency** — the alias passed to `leafhub_setup_project` must exactly match what your runtime code calls in `hub.get_key("<alias>")`. A mismatch is the most common cause of `credentials: none`.
-
-For the complete reference — Python runtime templates, CLI setup command pattern, environment variables, and troubleshooting — open `leafhub_dist/LEAFHUB.md` in your project after registration.
+**Alias consistency** is enforced by `leafhub.toml` — the manifest is the single source of truth for alias names. No hardcoded strings in application code.
 
 ---
 
@@ -260,10 +263,11 @@ For the complete reference — Python runtime templates, CLI setup command patte
 
 | File | Responsibility |
 |------|----------------|
-| `cli.py` | CLI entry point. Subcommands: `provider`, `project`, `register`, `manage`, `status`. |
+| `cli.py` | CLI entry point. Subcommands: `provider`, `project`, `register`, `init`, `doctor`, `manage`, `status`. |
 | `sdk.py` | Runtime key access. `get_key()`, `get_config()`, `from_directory()`. |
-| `probe.py` | Stdlib-only auto-detection. `detect()` finds `.leafhub` and returns `open_sdk()`. Distributed as `leafhub_dist/probe.py`. |
+| `probe.py` | Stdlib-only auto-detection. `detect()` finds `.leafhub` and returns `open_sdk()`. |
 | `errors.py` | Typed exceptions: `LeafHubError`, `InvalidTokenError`, `AliasNotBoundError`, etc. |
+| `scaffold/` | Script generators. `generate_setup_sh()`, `generate_install_sh()` from `leafhub.toml`. |
 
 ### `src/leafhub/core/`
 
@@ -281,4 +285,12 @@ For the complete reference — Python runtime templates, CLI setup command patte
 | `server.py` | FastAPI app. Serves the compiled Vue UI from `ui/dist/`. |
 | `auth.py` | Admin token middleware with per-IP rate limiting. |
 | `providers.py` | Provider CRUD. Connectivity probe on create. OAuth PKCE flow endpoints. |
-| `projects.py` | Project CRUD. Token lifecycle, `.leafhub` distribution, `leafhub_dist/` module distribution (`register.sh`, `probe.py`, `LEAFHUB.md`, `setup_template.sh`), CLI auto-registration, full cleanup on delete. |
+| `projects.py` | Project CRUD. Token lifecycle, `.leafhub` distribution, CLI auto-registration, full cleanup on delete. |
+
+### `sdk-pkg/leafhub_sdk/` (lightweight SDK — `pip install leafhub-sdk`)
+
+| File | Responsibility |
+|------|----------------|
+| `probe.py` | Stdlib-only auto-detection. `detect()` finds `.leafhub`, returns `ProbeResult`. |
+| `manifest.py` | Parse `leafhub.toml` manifests. `load_manifest()`, `get_default_alias()`. |
+| `resolve.py` | Unified credential resolution. `resolve(alias, as_env, as_client)`. |
