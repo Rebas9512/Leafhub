@@ -809,6 +809,15 @@ def cmd_manage(args: argparse.Namespace) -> None:
     ui_dir  = Path(__file__).parent.parent.parent / "ui"
     ui_dist = ui_dir / "dist"
 
+    if not ui_dir.is_dir():
+        _die(
+            f"UI source directory not found: {ui_dir}\n"
+            "  'leafhub manage' must be run from the standalone LeafHub installation,\n"
+            "  not from a project that has leafhub installed as a dependency.\n"
+            "  Use: ~/leafhub/.venv/Scripts/leafhub.exe manage  (Windows)\n"
+            "       ~/leafhub/.venv/bin/leafhub manage          (Linux/macOS)"
+        )
+
     def _need_node(action: str) -> None:
         if shutil.which("npm") is None:
             _die(

@@ -178,11 +178,28 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (-not $userPath) { $userPath = "" }
 
 if ($userPath -notlike "*$ScriptsDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$ScriptsDir", "User")
+    [Environment]::SetEnvironmentVariable("Path", "$ScriptsDir;$userPath", "User")
     Write-Info "Added $ScriptsDir to user PATH (takes effect in new terminals)."
+} else {
+    # Already present -- make sure it is at the front so it wins over other leafhub installs.
+    $parts    = $userPath -split ";" | Where-Object { $_ -ne "" -and $_ -ne $ScriptsDir }
+    $newPath  = (@($ScriptsDir) + $parts) -join ";"
+    if ($newPath -ne $userPath) {
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Write-Info "Moved $ScriptsDir to front of user PATH."
+    }
 }
 $env:Path = "$ScriptsDir;$env:Path"
 Write-Ok "PATH updated."
+
+# Warn if another leafhub.exe is shadowing this install in the current session.
+$allLeafhub = @(Get-Command leafhub -All -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+$others = $allLeafhub | Where-Object { $_ -ne $LeafhubExe -and $_ -notlike "$ScriptsDir*" }
+if ($others) {
+    Write-Warn "Another leafhub was found on PATH:"
+    foreach ($o in $others) { Write-Warn "  $o" }
+    Write-Warn "Open a new terminal so the correct leafhub ($LeafhubExe) takes effect."
+}
 
 # -- Done ----------------------------------------------------------------------
 Microsoft.PowerShell.Utility\Write-Host ""
