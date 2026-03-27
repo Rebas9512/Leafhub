@@ -120,6 +120,35 @@ Safe replacements: `--` for em dash, `-` for box drawing, `+` for checkmark, `.`
 
 `pip install "pkg @ git+https://..."` aggressively caches wheels. Use `--upgrade --no-cache-dir` when freshness matters.
 
+## 1.8 Subprocess Output Streaming (Python)
+
+`capture_output=True` (equivalent to `stdout=subprocess.PIPE, stderr=subprocess.PIPE`) buffers all subprocess output in memory until the child process exits. For long-running commands (pip install, model downloads) this causes two problems:
+
+1. **No real-time feedback** -- the user sees nothing until the subprocess finishes.
+2. **Windows Ctrl+C deadlock** -- `subprocess.run()` uses background reader threads to drain the pipes. When the user presses Ctrl+C, `KeyboardInterrupt` is raised inside `communicate()` while those threads are still blocked waiting for the pipe to close, causing `stdout_thread.join()` to hang indefinitely.
+
+**Rule: Never use `capture_output=True` for long-running subprocesses. Stream stdout and only capture stderr for error reporting:**
+
+```python
+# WRONG -- blocks real-time output; Ctrl+C deadlocks on Windows
+result = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "pkg"],
+    capture_output=True,
+    text=True,
+)
+
+# CORRECT -- stdout streams to terminal; stderr captured for error messages
+result = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "pkg"],
+    stderr=subprocess.PIPE,
+    text=True,
+)
+if result.returncode != 0:
+    print(f"[!] install failed:\n{result.stderr.strip()}", file=sys.stderr)
+```
+
+Also avoid `--quiet` flags on pip when running interactively -- suppressing output leaves the user with no indication that anything is happening.
+
 ---
 
 # Part 2: CMD-Specific (install.cmd)
@@ -840,3 +869,4 @@ python -m py_compile <project>/cli.py
 | 18 | macOS: provider setup skipped | `curl\|bash` stdin = pipe, `sys.stdin.isatty()` = False in leafhub | setup.sh handles prompts itself via `/dev/tty` |
 | 19 | macOS: wrong CLI hint | `leafscan run` doesn't exist | Changed to `leafscan scan <url>` |
 | 20 | macOS: stdout buffered after LLM call | Python block-buffers on some terminals | `flush=True` on all print() |
+| 21 | Windows: pip install shows no progress; Ctrl+C hangs | `capture_output=True` buffers stdout+stderr; Ctrl+C raises `KeyboardInterrupt` inside `communicate()` while reader threads are still blocked on pipe drain, causing `stdout_thread.join()` to deadlock | Use `stderr=subprocess.PIPE` only; let stdout stream to terminal |
